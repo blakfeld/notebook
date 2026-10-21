@@ -70,10 +70,9 @@ fn vault_lifecycle() {
     // The user forgets the passphrase and recovers with the written-down key.
     let mut bundle = KeyBundle::from_bytes(&bundle_bytes).unwrap();
     let recovery = RecoveryKey::parse(&written_down.to_lowercase()).unwrap();
-    let vault_key = bundle.unlock_with_recovery(&recovery).unwrap();
     let salt = Salt::generate().unwrap();
     let new_auth = derive_auth_secret(b"new passphrase", &salt, KdfVersion::CURRENT).unwrap();
-    bundle.rewrap_auth(&vault_key, &new_auth).unwrap();
+    bundle.recover_auth(&recovery, &new_auth).unwrap();
 
     // Old ciphertexts still open under the new secret; the old secret fails.
     let bundle = KeyBundle::from_bytes(&bundle.to_bytes()).unwrap();

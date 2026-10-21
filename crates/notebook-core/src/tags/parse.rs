@@ -1,5 +1,6 @@
 //! Finding tag occurrences in a note body.
 
+use std::collections::HashSet;
 use std::ops::Range;
 
 use pulldown_cmark::{Event, Parser, Tag};
@@ -21,7 +22,9 @@ pub enum TagForm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagOccurrence {
     /// Byte range of the tag in the body, from the opening `#` through the
-    /// name and any closing `#`. Trailing punctuation is outside the range.
+    /// name and any closing `#`. Trailing punctuation is outside the range,
+    /// except in the multi-word form, where punctuation before the closing
+    /// `#` (`#side projects.#`) is inside it.
     pub range: Range<usize>,
     pub path: TagPath,
     pub form: TagForm,
@@ -61,13 +64,12 @@ pub fn parse(body: &str) -> Vec<TagOccurrence> {
 /// Returns the distinct tags in `body`, in order of first occurrence. When a
 /// tag is written in several spellings, the first one is kept.
 pub fn tags_of(body: &str) -> Vec<TagPath> {
-    let mut tags: Vec<TagPath> = Vec::new();
-    for occurrence in parse(body) {
-        if !tags.contains(&occurrence.path) {
-            tags.push(occurrence.path);
-        }
-    }
-    tags
+    let mut seen = HashSet::new();
+    parse(body)
+        .into_iter()
+        .map(|o| o.path)
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
 }
 
 /// Reads a tag starting at the `#` at `start`, looking no further than
@@ -78,6 +80,14 @@ fn scan_tag(body: &str, start: usize, limit: usize) -> Option<TagOccurrence> {
     if first.is_whitespace() || first == '#' {
         return None;
     }
+
+    let word_end = rest
+        .find(|c: char| c.is_whitespace() || c == '#')
+        .unwrap_or(rest.len());
+    let name = trim_name(&rest[..word_end]);
+    // A multi-word tag must start the way a single-word tag would, so
+    // `#1 among C# devs` is not a tag.
+    let path = TagPath::from_raw(name)?;
 
     // Multi-word form: the next `#` on the line closes the tag if it follows
     // a non-whitespace character and precedes a boundary.
@@ -96,11 +106,6 @@ fn scan_tag(body: &str, start: usize, limit: usize) -> Option<TagOccurrence> {
         }
     }
 
-    let word_end = rest
-        .find(|c: char| c.is_whitespace() || c == '#')
-        .unwrap_or(rest.len());
-    let name = trim_name(&rest[..word_end]);
-    let path = TagPath::from_raw(name)?;
     let mut end = start + 1 + name.len();
     let mut form = TagForm::Bare;
     if name.len() == word_end
@@ -123,7 +128,7 @@ fn is_boundary(next: Option<char>) -> bool {
 }
 
 /// Strips trailing punctuation, `/`, and whitespace from a raw name.
-fn trim_name(name: &str) -> &str {
+pub(super) fn trim_name(name: &str) -> &str {
     name.trim_end_matches(|c: char| c == '/' || c.is_whitespace() || is_trailing_punctuation(c))
 }
 
@@ -217,6 +222,8 @@ mod tests {
             "C# and F#minor",
             "\\#notatag",
             "Fixed in #42 and #2024",
+            "Ranked #1 among C# devs",
+            "#. and then x#",
             "# ",
             "##",
             "#.",

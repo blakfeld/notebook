@@ -149,17 +149,32 @@ impl Note {
     }
 
     /// The title, derived from the first line containing non-whitespace text
-    /// with ATX heading markers removed. Empty when there is no such line or
-    /// it holds only heading markers; clients choose a placeholder.
+    /// with ATX heading markers removed. Code fence lines are skipped, and a
+    /// line indented by four or more columns is code, not a heading. Empty
+    /// when there is no such line or it holds only heading markers; clients
+    /// choose a placeholder.
     pub fn title(&self) -> &str {
         derive_title(&self.body)
     }
 }
 
 fn derive_title(body: &str) -> &str {
-    let Some(line) = body.lines().map(str::trim).find(|l| !l.is_empty()) else {
+    let is_fence = |line: &str| line.starts_with("```") || line.starts_with("~~~");
+    let Some((line, can_be_marker)) = body
+        .lines()
+        .map(|raw| {
+            // Up to three spaces of indentation still allow a block marker.
+            let unindented = raw.trim_start_matches(' ');
+            let can_be_marker = raw.len() - unindented.len() < 4 && !unindented.starts_with('\t');
+            (raw.trim(), can_be_marker)
+        })
+        .find(|&(line, can_be_marker)| !line.is_empty() && !(can_be_marker && is_fence(line)))
+    else {
         return "";
     };
+    if !can_be_marker {
+        return line;
+    }
     let hashes = line.bytes().take_while(|&b| b == b'#').count();
     let rest = &line[hashes..];
     let is_heading =
@@ -458,6 +473,12 @@ mod tests {
             ("- list item\n# heading", "- list item"),
             ("日本語のタイトル\n本文", "日本語のタイトル"),
             ("\u{3000}全角\u{3000}", "全角"),
+            ("```rust\nfn main() {}\n```", "fn main() {}"),
+            ("~~~\n\n```\nHello", "Hello"),
+            ("    # not a heading", "# not a heading"),
+            ("\t# tabbed code", "# tabbed code"),
+            ("  \t# tabbed code", "# tabbed code"),
+            ("    ```\ncode", "```"),
         ];
         for (body, title) in cases {
             assert_eq!(note(body).title(), title, "{body:?}");

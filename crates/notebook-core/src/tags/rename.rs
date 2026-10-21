@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use super::{TagForm, TagPath, parse};
+use super::{TagForm, TagPath, is_trailing_punctuation, parse};
 use crate::note::{Note, NoteId};
 
 /// Error returned by [`rename`].
@@ -10,12 +10,17 @@ use crate::note::{Note, NoteId};
 pub enum RenameError {
     /// The given name is not a valid tag name.
     InvalidName(String),
+    /// A tag in this note can't take the new name without changing the text
+    /// around it, such as `#work#x` renamed to a multi-word name, whose
+    /// closing `#` would run into `#x`.
+    Unrepresentable(NoteId),
 }
 
 impl fmt::Display for RenameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RenameError::InvalidName(name) => write!(f, "invalid tag name: {name:?}"),
+            RenameError::Unrepresentable(id) => write!(f, "tag can't be rewritten in note {id}"),
         }
     }
 }
@@ -27,47 +32,76 @@ impl std::error::Error for RenameError {}
 /// Every occurrence of `old` and of its descendants (`old/...`) is rewritten,
 /// matching case-insensitively; descendants keep their own suffix. Only the
 /// tag text changes. Returns the identifier and new body of each note whose
-/// body changed; the notes themselves are not modified.
+/// body changed; the notes themselves are not modified. Fails without
+/// returning any rewrites if some note's tags would not read back renamed.
 pub fn rename(notes: &[Note], old: &str, new: &str) -> Result<Vec<(NoteId, String)>, RenameError> {
     let old = TagPath::parse(old).ok_or_else(|| RenameError::InvalidName(old.to_owned()))?;
     let new = TagPath::parse(new).ok_or_else(|| RenameError::InvalidName(new.to_owned()))?;
-    Ok(notes
-        .iter()
-        .filter_map(|note| {
-            let body = rewrite(note.body(), &old, &new)?;
-            (body != note.body()).then(|| (note.id(), body))
-        })
-        .collect())
+    let mut changes = Vec::new();
+    for note in notes {
+        if let Some(body) = rewrite(note, &old, &new)?
+            && body != note.body()
+        {
+            changes.push((note.id(), body));
+        }
+    }
+    Ok(changes)
 }
 
-/// Rewrites `body`, or returns `None` if it has no matching occurrence.
-fn rewrite(body: &str, old: &TagPath, new: &TagPath) -> Option<String> {
+/// Rewrites `note`'s body, or returns `None` if it has no matching
+/// occurrence. Fails if the new body doesn't parse back to the renamed tags.
+fn rewrite(note: &Note, old: &TagPath, new: &TagPath) -> Result<Option<String>, RenameError> {
+    let body = note.body();
+    let occurrences = parse(body);
+    if !occurrences.iter().any(|o| old.is_prefix_of(&o.path)) {
+        return Ok(None);
+    }
     let mut out = String::with_capacity(body.len());
+    let mut expected = Vec::with_capacity(occurrences.len());
     let mut copied = 0;
-    for occurrence in parse(body)
-        .into_iter()
-        .filter(|o| old.is_prefix_of(&o.path))
-    {
+    for occurrence in occurrences {
+        if !old.is_prefix_of(&occurrence.path) {
+            expected.push(occurrence.path);
+            continue;
+        }
         out.push_str(&body[copied..occurrence.range.start]);
-        let name = new
-            .segments()
-            .iter()
-            .chain(&occurrence.path.segments()[old.depth()..])
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join("/");
+        let path = TagPath::from_segments(
+            new.segments()
+                .iter()
+                .chain(&occurrence.path.segments()[old.depth()..])
+                .cloned()
+                .collect(),
+        );
+        let name = path.to_string();
+        let mut end = occurrence.range.end;
         out.push('#');
         out.push_str(&name);
         if name.contains(char::is_whitespace) || occurrence.form == TagForm::Closed {
+            if occurrence.form == TagForm::Bare {
+                // Drop trailing slashes so the closing `#` comes before
+                // whatever followed them: `#a/ x` becomes `#b c# x`.
+                end = body.len() - body[end..].trim_start_matches('/').len();
+            }
             out.push('#');
         }
-        copied = occurrence.range.end;
-    }
-    if copied == 0 {
-        return None;
+        if occurrence.form == TagForm::MultiWord {
+            // Punctuation inside the old closing `#` moves outside the new
+            // tag: `#my tag!#` becomes `#x y#!` or `#x!`.
+            let content = &body[occurrence.range.start + 1..occurrence.range.end - 1];
+            out.extend(
+                content[parse::trim_name(content).len()..]
+                    .chars()
+                    .filter(|&c| is_trailing_punctuation(c)),
+            );
+        }
+        expected.push(path);
+        copied = end;
     }
     out.push_str(&body[copied..]);
-    Some(out)
+    if parse(&out).into_iter().map(|o| o.path).ne(expected) {
+        return Err(RenameError::Unrepresentable(note.id()));
+    }
+    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -202,6 +236,46 @@ mod tests {
     }
 
     #[test]
+    fn punctuation_inside_a_multi_word_tag_is_kept() {
+        assert_eq!(
+            one("#my tag!# today", "my tag", "x y").as_deref(),
+            Some("#x y#! today")
+        );
+        assert_eq!(
+            one("#side projects.# ok", "side projects", "ideas").as_deref(),
+            Some("#ideas. ok")
+        );
+    }
+
+    #[test]
+    fn closing_hash_skips_trailing_slashes() {
+        assert_eq!(
+            one("#old/ notes", "old", "new name").as_deref(),
+            Some("#new name# notes")
+        );
+        assert_eq!(
+            one("#old. x", "old", "new name").as_deref(),
+            Some("#new name#. x")
+        );
+        assert_eq!(
+            one("#old`code`", "old", "new name").as_deref(),
+            Some("#new name#`code`")
+        );
+    }
+
+    #[test]
+    fn unrepresentable_rewrites_fail() {
+        for body in ["#old#x", "#old/#x"] {
+            assert_eq!(
+                rename(&[note(1, "#old"), note(2, body)], "old", "new name"),
+                Err(RenameError::Unrepresentable(id(2))),
+                "{body:?}"
+            );
+        }
+        assert_eq!(one("#old#x", "old", "new").as_deref(), Some("#new#x"));
+    }
+
+    #[test]
     fn archived_and_trashed_notes_are_rewritten() {
         let mut archived = note(1, "#work");
         archived.set_archived(true);
@@ -254,6 +328,11 @@ mod tests {
         let err = RenameError::InvalidName("a#b".to_owned());
         assert_eq!(err.to_string(), "invalid tag name: \"a#b\"");
         let _: &dyn std::error::Error = &err;
+        let err = RenameError::Unrepresentable(id(1));
+        assert_eq!(
+            err.to_string(),
+            format!("tag can't be rewritten in note {}", id(1))
+        );
     }
 
     #[test]
