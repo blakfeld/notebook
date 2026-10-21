@@ -3,7 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+    paths: &code-paths
+      - "crates/**"
+      - "web/**"
+      - "scripts/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "rustfmt.toml"
+      - ".github/workflows/**"
   pull_request:
+    paths: *code-paths
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
