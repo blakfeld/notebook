@@ -1,0 +1,224 @@
+//! The recovery key: a human-transcribable code that unlocks the vault on its
+//! own.
+//!
+//! It is 20 bytes: 16 random bytes plus a 4-byte checksum (the start of
+//! `SHA-256("notebook/v1/recovery" || random)`). That is exactly 32 Crockford
+//! base32 characters, shown as 8 hyphen-separated groups of 4.
+
+use std::fmt;
+
+use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
+
+use super::{CryptoError, VaultId, fill_random};
+use super::{keys::SymmetricKey, secret::recovery_wrapping_key};
+
+const RANDOM_LEN: usize = 16;
+const CHECKSUM_LEN: usize = 4;
+const ENCODED_LEN: usize = 32;
+const GROUP_LEN: usize = 4;
+const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const CHECKSUM_DOMAIN: &[u8] = b"notebook/v1/recovery";
+
+/// A recovery key generated at vault creation.
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub struct RecoveryKey([u8; RANDOM_LEN]);
+
+impl RecoveryKey {
+    /// Generates a new random recovery key.
+    pub fn generate() -> Result<Self, CryptoError> {
+        let mut key = Self([0; RANDOM_LEN]);
+        fill_random(&mut key.0)?;
+        Ok(key)
+    }
+
+    /// The key as the user should write it down, e.g.
+    /// `7Q2M-K9XD-...` (8 groups of 4).
+    pub fn to_display(&self) -> Zeroizing<String> {
+        let mut bytes = Zeroizing::new([0u8; RANDOM_LEN + CHECKSUM_LEN]);
+        bytes[..RANDOM_LEN].copy_from_slice(&self.0);
+        bytes[RANDOM_LEN..].copy_from_slice(&checksum(&self.0));
+
+        let mut out = Zeroizing::new(String::with_capacity(ENCODED_LEN + ENCODED_LEN / GROUP_LEN));
+        for i in 0..ENCODED_LEN {
+            if i > 0 && i % GROUP_LEN == 0 {
+                out.push('-');
+            }
+            out.push(ALPHABET[read_5_bits(&*bytes, i) as usize] as char);
+        }
+        out
+    }
+
+    /// Parses a recovery key as typed by a person. Case, spaces, and hyphens
+    /// are ignored, and `I`/`L` read as `1` and `O` as `0`. The wrong length,
+    /// an unknown character, or a checksum mismatch is
+    /// [`CryptoError::InvalidRecoveryKey`].
+    pub fn parse(text: &str) -> Result<Self, CryptoError> {
+        let mut values = Zeroizing::new([0u8; ENCODED_LEN]);
+        let mut n = 0;
+        for c in text.chars() {
+            if c == '-' || c.is_whitespace() {
+                continue;
+            }
+            if n == ENCODED_LEN {
+                return Err(CryptoError::InvalidRecoveryKey);
+            }
+            values[n] = decode_char(c).ok_or(CryptoError::InvalidRecoveryKey)?;
+            n += 1;
+        }
+        if n != ENCODED_LEN {
+            return Err(CryptoError::InvalidRecoveryKey);
+        }
+
+        let mut bytes = Zeroizing::new([0u8; RANDOM_LEN + CHECKSUM_LEN]);
+        for (i, &v) in values.iter().enumerate() {
+            write_5_bits(&mut *bytes, i, v);
+        }
+        let key = Self(bytes[..RANDOM_LEN].try_into().expect("16 bytes"));
+        if checksum(&key.0) != bytes[RANDOM_LEN..] {
+            return Err(CryptoError::InvalidRecoveryKey);
+        }
+        Ok(key)
+    }
+
+    pub(crate) fn wrapping_key(&self, vault: VaultId) -> SymmetricKey {
+        recovery_wrapping_key(&self.0, vault)
+    }
+}
+
+impl fmt::Debug for RecoveryKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RecoveryKey(..)")
+    }
+}
+
+fn checksum(random: &[u8; RANDOM_LEN]) -> [u8; CHECKSUM_LEN] {
+    let digest = Sha256::new()
+        .chain_update(CHECKSUM_DOMAIN)
+        .chain_update(random)
+        .finalize();
+    digest[..CHECKSUM_LEN].try_into().expect("4 bytes")
+}
+
+fn decode_char(c: char) -> Option<u8> {
+    let c = match c.to_ascii_uppercase() {
+        'I' | 'L' => '1',
+        'O' => '0',
+        c => c,
+    };
+    ALPHABET
+        .iter()
+        .position(|&a| a as char == c)
+        .map(|i| i as u8)
+}
+
+/// Reads the `index`-th 5-bit group, most significant bit first.
+fn read_5_bits(bytes: &[u8], index: usize) -> u8 {
+    (0..5).fold(0, |acc, b| {
+        let bit = index * 5 + b;
+        (acc << 1) | ((bytes[bit / 8] >> (7 - bit % 8)) & 1)
+    })
+}
+
+fn write_5_bits(bytes: &mut [u8], index: usize, value: u8) {
+    for b in 0..5 {
+        let bit = index * 5 + b;
+        if (value >> (4 - b)) & 1 == 1 {
+            bytes[bit / 8] |= 1 << (7 - bit % 8);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_format() {
+        let shown = RecoveryKey::generate().unwrap().to_display();
+        let groups: Vec<&str> = shown.split('-').collect();
+        assert_eq!(groups.len(), 8, "{}", *shown);
+        for group in groups {
+            assert_eq!(group.len(), 4);
+            assert!(group.bytes().all(|b| ALPHABET.contains(&b)));
+        }
+    }
+
+    #[test]
+    fn generated_keys_differ() {
+        let a = RecoveryKey::generate().unwrap().to_display();
+        let b = RecoveryKey::generate().unwrap().to_display();
+        assert_ne!(*a, *b);
+    }
+
+    #[test]
+    fn display_round_trips() {
+        let key = RecoveryKey::generate().unwrap();
+        let parsed = RecoveryKey::parse(&key.to_display()).unwrap();
+        assert_eq!(parsed.0, key.0);
+    }
+
+    #[test]
+    fn known_encoding() {
+        let key = RecoveryKey([0; RANDOM_LEN]);
+        let shown = key.to_display();
+        assert!(shown.starts_with("0000-0000-0000-0000-0000-0000-"));
+        assert_eq!(RecoveryKey::parse(&shown).unwrap().0, [0; RANDOM_LEN]);
+    }
+
+    #[test]
+    fn sloppy_but_correct_entry_parses() {
+        let key = RecoveryKey([0; RANDOM_LEN]);
+        let shown = key.to_display();
+        let sloppy = shown.to_lowercase().replace('-', " ").replace('0', "o");
+        assert_eq!(RecoveryKey::parse(&sloppy).unwrap().0, key.0);
+
+        let key = RecoveryKey::generate().unwrap();
+        let sloppy = format!("  {}  ", key.to_display().replace('1', "l").to_lowercase());
+        assert_eq!(RecoveryKey::parse(&sloppy).unwrap().0, key.0);
+    }
+
+    #[test]
+    fn every_single_character_typo_is_detected() {
+        let shown = RecoveryKey::generate().unwrap().to_display();
+        for (i, original) in shown.char_indices() {
+            if original == '-' {
+                continue;
+            }
+            for &replacement in ALPHABET {
+                let replacement = replacement as char;
+                if replacement == original {
+                    continue;
+                }
+                let mut typo = shown.to_string();
+                typo.replace_range(i..i + 1, &replacement.to_string());
+                assert_eq!(
+                    RecoveryKey::parse(&typo).unwrap_err(),
+                    CryptoError::InvalidRecoveryKey,
+                    "{typo}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrong_length_and_bad_characters_are_rejected() {
+        let shown = RecoveryKey::generate().unwrap().to_display();
+        let short = &shown[..shown.len() - 1];
+        let long = format!("{}0", *shown);
+        let bad_char = shown.replacen(|c: char| c.is_ascii_alphanumeric(), "U", 1);
+        for text in ["", short, &long, &bad_char] {
+            assert_eq!(
+                RecoveryKey::parse(text).unwrap_err(),
+                CryptoError::InvalidRecoveryKey,
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn debug_output_is_redacted() {
+        let key = RecoveryKey::generate().unwrap();
+        assert_eq!(format!("{key:?}"), "RecoveryKey(..)");
+    }
+}
