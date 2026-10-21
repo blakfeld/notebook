@@ -1,0 +1,325 @@
+//! The key bundle: the vault key wrapped for server storage.
+//!
+//! ```text
+//! offset  size  field
+//! 0       1     bundle format version (1)
+//! 1       16    vault id
+//! 17      2     auth entry length (u16 big-endian)
+//! 19      a     auth entry (envelope)
+//! 19+a    2     recovery entry length (u16 big-endian)
+//! 21+a    r     recovery entry (envelope)
+//! ```
+
+use super::envelope::{self, Context};
+use super::keys::{SymmetricKey, VaultKey};
+use super::{AuthSecret, CryptoError, RecoveryKey, VaultId};
+
+const BUNDLE_VERSION: u8 = 1;
+const KIND_VAULT_KEY_AUTH: u8 = 32;
+const KIND_VAULT_KEY_RECOVERY: u8 = 33;
+
+/// The vault key wrapped under an [`AuthSecret`] and, separately, under the
+/// [`RecoveryKey`]. The server stores it as opaque bytes and can't unwrap it;
+/// either secret alone recovers the [`VaultKey`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyBundle {
+    vault: VaultId,
+    auth_entry: Vec<u8>,
+    recovery_entry: Vec<u8>,
+}
+
+impl KeyBundle {
+    /// Wraps `vault_key` for `vault` under both secrets.
+    pub fn create(
+        vault: VaultId,
+        vault_key: &VaultKey,
+        auth: &AuthSecret,
+        recovery: &RecoveryKey,
+    ) -> Result<Self, CryptoError> {
+        Ok(Self {
+            vault,
+            auth_entry: wrap(
+                &auth.wrapping_key(vault),
+                vault,
+                KIND_VAULT_KEY_AUTH,
+                vault_key,
+            )?,
+            recovery_entry: wrap(
+                &recovery.wrapping_key(vault),
+                vault,
+                KIND_VAULT_KEY_RECOVERY,
+                vault_key,
+            )?,
+        })
+    }
+
+    /// The vault this bundle belongs to.
+    pub fn vault_id(&self) -> VaultId {
+        self.vault
+    }
+
+    /// Recovers the vault key with the auth secret.
+    pub fn unlock_with_auth(&self, auth: &AuthSecret) -> Result<VaultKey, CryptoError> {
+        unwrap(
+            &auth.wrapping_key(self.vault),
+            self.vault,
+            KIND_VAULT_KEY_AUTH,
+            &self.auth_entry,
+        )
+    }
+
+    /// Recovers the vault key with the recovery key.
+    pub fn unlock_with_recovery(&self, recovery: &RecoveryKey) -> Result<VaultKey, CryptoError> {
+        unwrap(
+            &recovery.wrapping_key(self.vault),
+            self.vault,
+            KIND_VAULT_KEY_RECOVERY,
+            &self.recovery_entry,
+        )
+    }
+
+    /// Replaces the auth entry, e.g. after a passphrase change or recovery.
+    /// The recovery entry, the vault key, and everything it protects are
+    /// unchanged; the old auth secret stops working.
+    pub fn rewrap_auth(
+        &mut self,
+        vault_key: &VaultKey,
+        auth: &AuthSecret,
+    ) -> Result<(), CryptoError> {
+        self.auth_entry = wrap(
+            &auth.wrapping_key(self.vault),
+            self.vault,
+            KIND_VAULT_KEY_AUTH,
+            vault_key,
+        )?;
+        Ok(())
+    }
+
+    /// Serializes the bundle for storage.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out =
+            Vec::with_capacity(1 + 16 + 2 + self.auth_entry.len() + 2 + self.recovery_entry.len());
+        out.push(BUNDLE_VERSION);
+        out.extend_from_slice(&self.vault.to_bytes());
+        for entry in [&self.auth_entry, &self.recovery_entry] {
+            let len = u16::try_from(entry.len()).expect("entries are 74 bytes");
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(entry);
+        }
+        out
+    }
+
+    /// Parses bytes produced by [`to_bytes`](Self::to_bytes). Anything else,
+    /// including trailing bytes, is [`CryptoError::Malformed`]; an unknown
+    /// format version is [`CryptoError::UnsupportedVersion`].
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        let mut reader = Reader(bytes);
+        let version = reader.take(1)?[0];
+        if version != BUNDLE_VERSION {
+            return Err(CryptoError::UnsupportedVersion(version));
+        }
+        let vault = VaultId::from_bytes(reader.take(16)?.try_into().expect("16 bytes"));
+        let auth_entry = reader.entry()?;
+        let recovery_entry = reader.entry()?;
+        if !reader.0.is_empty() {
+            return Err(CryptoError::Malformed);
+        }
+        Ok(Self {
+            vault,
+            auth_entry,
+            recovery_entry,
+        })
+    }
+}
+
+fn wrap(
+    key: &SymmetricKey,
+    vault: VaultId,
+    kind: u8,
+    vault_key: &VaultKey,
+) -> Result<Vec<u8>, CryptoError> {
+    let ctx = Context {
+        vault,
+        kind,
+        note: None,
+    };
+    envelope::seal(key.as_bytes(), &ctx, vault_key.0.as_bytes())
+}
+
+fn unwrap(
+    key: &SymmetricKey,
+    vault: VaultId,
+    kind: u8,
+    entry: &[u8],
+) -> Result<VaultKey, CryptoError> {
+    let ctx = Context {
+        vault,
+        kind,
+        note: None,
+    };
+    let bytes = envelope::open(key.as_bytes(), &ctx, entry)?;
+    SymmetricKey::from_slice(&bytes).map(VaultKey)
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl<'a> Reader<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], CryptoError> {
+        if self.0.len() < n {
+            return Err(CryptoError::Malformed);
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+
+    fn entry(&mut self) -> Result<Vec<u8>, CryptoError> {
+        let len = u16::from_be_bytes(self.take(2)?.try_into().expect("2 bytes"));
+        Ok(self.take(len.into())?.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{NoteKey, PayloadKind};
+    use crate::note::NoteId;
+
+    struct Fixture {
+        vault: VaultId,
+        vault_key: VaultKey,
+        auth: AuthSecret,
+        recovery: RecoveryKey,
+        bundle: KeyBundle,
+    }
+
+    fn fixture() -> Fixture {
+        let vault = VaultId::from_parts(1_000, 1);
+        let vault_key = VaultKey::generate().unwrap();
+        let auth = AuthSecret::from_bytes(&[3; 64]).unwrap();
+        let recovery = RecoveryKey::generate().unwrap();
+        let bundle = KeyBundle::create(vault, &vault_key, &auth, &recovery).unwrap();
+        Fixture {
+            vault,
+            vault_key,
+            auth,
+            recovery,
+            bundle,
+        }
+    }
+
+    /// Checks that `unlocked` is the same vault key by unwrapping a note key
+    /// the original wrapped and decrypting with it.
+    fn assert_same_vault_key(f: &Fixture, unlocked: &VaultKey) {
+        let note = NoteId::from_parts(1_000, 7);
+        let note_key = NoteKey::generate().unwrap();
+        let wrapped = f.vault_key.wrap_note_key(f.vault, note, &note_key).unwrap();
+        let sealed = note_key
+            .encrypt(f.vault, note, PayloadKind::NotePayload, b"x")
+            .unwrap();
+        let unwrapped = unlocked.unwrap_note_key(f.vault, note, &wrapped).unwrap();
+        let plaintext = unwrapped
+            .decrypt(f.vault, note, PayloadKind::NotePayload, &sealed)
+            .unwrap();
+        assert_eq!(&*plaintext, b"x");
+    }
+
+    #[test]
+    fn unlocks_with_either_secret() {
+        let f = fixture();
+        assert_same_vault_key(&f, &f.bundle.unlock_with_auth(&f.auth).unwrap());
+        assert_same_vault_key(&f, &f.bundle.unlock_with_recovery(&f.recovery).unwrap());
+    }
+
+    #[test]
+    fn wrong_secrets_fail() {
+        let f = fixture();
+        let other_auth = AuthSecret::from_bytes(&[4; 64]).unwrap();
+        let other_recovery = RecoveryKey::generate().unwrap();
+        assert!(matches!(
+            f.bundle.unlock_with_auth(&other_auth),
+            Err(CryptoError::Decrypt)
+        ));
+        assert!(matches!(
+            f.bundle.unlock_with_recovery(&other_recovery),
+            Err(CryptoError::Decrypt)
+        ));
+    }
+
+    #[test]
+    fn entries_are_not_interchangeable() {
+        let f = fixture();
+        let swapped = KeyBundle {
+            auth_entry: f.bundle.recovery_entry.clone(),
+            recovery_entry: f.bundle.auth_entry.clone(),
+            ..f.bundle.clone()
+        };
+        assert!(swapped.unlock_with_auth(&f.auth).is_err());
+        assert!(swapped.unlock_with_recovery(&f.recovery).is_err());
+    }
+
+    #[test]
+    fn serialization_round_trips() {
+        let f = fixture();
+        let bytes = f.bundle.to_bytes();
+        assert_eq!(bytes.len(), 1 + 16 + 2 * (2 + 32 + 42));
+        let parsed = KeyBundle::from_bytes(&bytes).unwrap();
+        assert_eq!(parsed, f.bundle);
+        assert_eq!(parsed.vault_id(), f.vault);
+        assert_same_vault_key(&f, &parsed.unlock_with_auth(&f.auth).unwrap());
+    }
+
+    #[test]
+    fn malformed_bytes_are_rejected() {
+        let bytes = fixture().bundle.to_bytes();
+        for len in 0..bytes.len() {
+            assert!(
+                KeyBundle::from_bytes(&bytes[..len]).is_err(),
+                "length {len}"
+            );
+        }
+
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            KeyBundle::from_bytes(&trailing),
+            Err(CryptoError::Malformed)
+        );
+
+        let mut wrong_version = bytes;
+        wrong_version[0] = 2;
+        assert_eq!(
+            KeyBundle::from_bytes(&wrong_version),
+            Err(CryptoError::UnsupportedVersion(2))
+        );
+
+        assert!(KeyBundle::from_bytes(&[0xff; 200]).is_err());
+    }
+
+    #[test]
+    fn bundle_is_bound_to_its_vault() {
+        let f = fixture();
+        let other_vault = VaultId::from_parts(1_000, 2);
+        let moved = KeyBundle {
+            vault: other_vault,
+            ..f.bundle.clone()
+        };
+        assert!(moved.unlock_with_auth(&f.auth).is_err());
+        assert!(moved.unlock_with_recovery(&f.recovery).is_err());
+    }
+
+    #[test]
+    fn passphrase_change_rewraps_only_the_auth_entry() {
+        let mut f = fixture();
+        let recovery_entry = f.bundle.recovery_entry.clone();
+        let new_auth = AuthSecret::from_bytes(&[9; 64]).unwrap();
+
+        let vault_key = f.bundle.unlock_with_recovery(&f.recovery).unwrap();
+        f.bundle.rewrap_auth(&vault_key, &new_auth).unwrap();
+
+        assert_eq!(f.bundle.recovery_entry, recovery_entry);
+        assert_same_vault_key(&f, &f.bundle.unlock_with_auth(&new_auth).unwrap());
+        assert_same_vault_key(&f, &f.bundle.unlock_with_recovery(&f.recovery).unwrap());
+        assert!(f.bundle.unlock_with_auth(&f.auth).is_err());
+    }
+}
