@@ -25,9 +25,9 @@ opt-level = 3
 [workspace.dependencies]
 notebook-core = { path = "crates/notebook-core" }
 
-argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 axum = "0.8.9"
-chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "0.4.3"
 hkdf = "0.13.0"
 pulldown-cmark = { version = "0.13.4", default-features = false }

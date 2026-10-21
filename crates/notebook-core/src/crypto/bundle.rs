@@ -78,14 +78,29 @@ impl KeyBundle {
         )
     }
 
-    /// Replaces the auth entry, e.g. after a passphrase change or recovery.
-    /// The recovery entry, the vault key, and everything it protects are
-    /// unchanged; the old auth secret stops working.
-    pub fn rewrap_auth(
+    /// Replaces the auth entry after a passphrase change, unlocking with the
+    /// old auth secret first so the new entry wraps the same vault key as the
+    /// recovery entry. The recovery entry, the vault key, and everything it
+    /// protects are unchanged; the old auth secret stops working.
+    pub fn change_auth(&mut self, old: &AuthSecret, new: &AuthSecret) -> Result<(), CryptoError> {
+        let vault_key = self.unlock_with_auth(old)?;
+        self.rewrap_auth(&vault_key, new)
+    }
+
+    /// Replaces the auth entry after recovery, unlocking with the recovery
+    /// key first. Otherwise the same as [`change_auth`](Self::change_auth).
+    pub fn recover_auth(
         &mut self,
-        vault_key: &VaultKey,
-        auth: &AuthSecret,
+        recovery: &RecoveryKey,
+        new: &AuthSecret,
     ) -> Result<(), CryptoError> {
+        let vault_key = self.unlock_with_recovery(recovery)?;
+        self.rewrap_auth(&vault_key, new)
+    }
+
+    /// Wraps `vault_key`, which must come from unlocking this bundle, as the
+    /// new auth entry.
+    fn rewrap_auth(&mut self, vault_key: &VaultKey, auth: &AuthSecret) -> Result<(), CryptoError> {
         self.auth_entry = wrap(
             &auth.wrapping_key(self.vault),
             self.vault,
@@ -416,7 +431,7 @@ mod tests {
     fn rewrap_survives_serialization() {
         let mut f = fixture();
         let new_auth = AuthSecret::from_bytes(&[9; 64]).unwrap();
-        f.bundle.rewrap_auth(&f.vault_key, &new_auth).unwrap();
+        f.bundle.change_auth(&f.auth, &new_auth).unwrap();
         let parsed = KeyBundle::from_bytes(&f.bundle.to_bytes()).unwrap();
         assert_eq!(parsed.vault_id(), f.vault);
         assert_same_vault_key(&f, &parsed.unlock_with_auth(&new_auth).unwrap());
@@ -429,12 +444,29 @@ mod tests {
         let recovery_entry = f.bundle.recovery_entry.clone();
         let new_auth = AuthSecret::from_bytes(&[9; 64]).unwrap();
 
-        let vault_key = f.bundle.unlock_with_recovery(&f.recovery).unwrap();
-        f.bundle.rewrap_auth(&vault_key, &new_auth).unwrap();
+        f.bundle.recover_auth(&f.recovery, &new_auth).unwrap();
 
         assert_eq!(f.bundle.recovery_entry, recovery_entry);
         assert_same_vault_key(&f, &f.bundle.unlock_with_auth(&new_auth).unwrap());
         assert_same_vault_key(&f, &f.bundle.unlock_with_recovery(&f.recovery).unwrap());
         assert!(f.bundle.unlock_with_auth(&f.auth).is_err());
+    }
+
+    #[test]
+    fn rewrapping_requires_a_secret_that_unlocks() {
+        let mut f = fixture();
+        let before = f.bundle.clone();
+        let new_auth = AuthSecret::from_bytes(&[9; 64]).unwrap();
+        let wrong_auth = AuthSecret::from_bytes(&[4; 64]).unwrap();
+        let wrong_recovery = RecoveryKey::generate().unwrap();
+        assert_eq!(
+            f.bundle.change_auth(&wrong_auth, &new_auth),
+            Err(CryptoError::Decrypt)
+        );
+        assert_eq!(
+            f.bundle.recover_auth(&wrong_recovery, &new_auth),
+            Err(CryptoError::Decrypt)
+        );
+        assert_eq!(f.bundle, before);
     }
 }

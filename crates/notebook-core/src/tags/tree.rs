@@ -87,15 +87,16 @@ impl TagTree {
     }
 }
 
+/// Children come out of the map ordered by their lowercased key, which is
+/// the case-insensitive name order [`TagNode::children`] promises.
 fn finish(children: BTreeMap<String, Builder>, parent: &[String]) -> Vec<TagNode> {
-    let mut nodes: Vec<TagNode> = children
+    children
         .into_values()
         .map(|mut b| {
             let name = b.spelling.map(|(_, s)| s).unwrap_or_default();
             let mut segments = parent.to_vec();
             segments.push(name.clone());
             b.notes.sort();
-            b.notes.dedup();
             TagNode {
                 children: finish(b.children, &segments),
                 name,
@@ -103,14 +104,7 @@ fn finish(children: BTreeMap<String, Builder>, parent: &[String]) -> Vec<TagNode
                 notes: b.notes.into_iter().map(|(_, id)| id).collect(),
             }
         })
-        .collect();
-    nodes.sort_by(|a, b| {
-        a.name
-            .to_lowercase()
-            .cmp(&b.name.to_lowercase())
-            .then_with(|| a.name.cmp(&b.name))
-    });
-    nodes
+        .collect()
 }
 
 #[cfg(test)]
