@@ -4,6 +4,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod note;
+pub mod tags;
+
 /// Returns the version of `notebook-core`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
