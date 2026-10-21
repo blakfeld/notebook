@@ -1,8 +1,9 @@
 # TODO
 
 The OpenSpec changes for Notebook, in priority order. Each one lives in
-`openspec/changes/<name>/`. Work top to bottom. Archive each change before
-starting any later change that modifies its capability.
+`openspec/changes/<name>/` (archived ones in `openspec/changes/archive/`).
+Work top to bottom. Archive each change before starting any later change that
+modifies its capability.
 
 Milestones mark the points where something usable exists.
 
@@ -10,8 +11,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 ## Foundation
 
-1. [~] `scaffold-workspace`: Cargo workspace (core, server, app), TS frontend, CI, wasm32 build check
-   - Implemented: 16/16 tasks done, `scripts/check.sh` passes. Next: review, first commit, `/opsx:archive`.
+1. [x] `scaffold-workspace`: Cargo workspace (core, server, app), TS frontend, CI, wasm32 build check
 2. [ ] `note-model-and-tags`: note model, Bear-style nested inline tags, derived tag tree, tag rename
 3. [ ] `vault-encryption`: key hierarchy, per-note keys, XChaCha20-Poly1305, recovery key
 4. [ ] `crdt-note-documents`: per-note CRDT docs (Yrs), encrypted updates and snapshots
