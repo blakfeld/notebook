@@ -13,6 +13,7 @@
 //! - **Multi-word** form: `#name with spaces#` on one line. The name contains
 //!   no `#`, its last character is not whitespace, and the closing `#` is
 //!   followed by whitespace, the end of the line, or trailing punctuation.
+//!   Its first word must itself be a valid single-word tag.
 //! - Trailing punctuation (`. , ; : ! ? " ' ) ] }`), `/`, and whitespace at
 //!   the end of a name are not part of the tag.
 //! - `/` separates nested segments. Empty segments are dropped and runs of

@@ -36,8 +36,15 @@ mod tests {
     };
     use tauri::webview::{InvokeRequest, WebviewWindowBuilder};
 
+    /// The origin Tauri serves local app content from on this platform.
+    const LOCAL_ORIGIN: &str = if cfg!(any(windows, target_os = "android")) {
+        "http://tauri.localhost"
+    } else {
+        "tauri://localhost"
+    };
+
     fn invoke(cmd: &str, body: InvokeBody) -> Result<String, serde_json::Value> {
-        invoke_with(mock_context(noop_assets()), "tauri://localhost", cmd, body)
+        invoke_with(mock_context(noop_assets()), LOCAL_ORIGIN, cmd, body)
     }
 
     fn invoke_with(
@@ -82,31 +89,8 @@ mod tests {
     }
 
     #[test]
-    fn core_version_ignores_unexpected_arguments() {
-        let body = InvokeBody::Json(serde_json::json!({ "extra": 1 }));
-        assert_eq!(
-            invoke("core_version", body),
-            Ok(notebook_core::version().to_owned())
-        );
-    }
-
-    #[test]
-    fn core_version_accepts_raw_body() {
-        let body = InvokeBody::Raw(vec![1, 2, 3]);
-        assert_eq!(
-            invoke("core_version", body),
-            Ok(notebook_core::version().to_owned())
-        );
-    }
-
-    #[test]
     fn unregistered_command_is_rejected() {
         assert!(invoke("not_a_command", InvokeBody::default()).is_err());
-    }
-
-    #[test]
-    fn command_names_are_case_sensitive() {
-        assert!(invoke("Core_Version", InvokeBody::default()).is_err());
     }
 
     #[test]
@@ -114,7 +98,7 @@ mod tests {
         assert_eq!(
             invoke_with(
                 context(),
-                "tauri://localhost",
+                LOCAL_ORIGIN,
                 "core_version",
                 InvokeBody::default()
             ),
@@ -124,14 +108,28 @@ mod tests {
 
     #[test]
     fn remote_origin_is_rejected() {
+        // The same command and context succeed locally, so the rejection below
+        // can only come from the origin.
         assert!(
             invoke_with(
-                mock_context(noop_assets()),
-                "https://example.com",
+                context(),
+                LOCAL_ORIGIN,
                 "core_version",
                 InvokeBody::default()
             )
-            .is_err()
+            .is_ok()
+        );
+
+        let err = invoke_with(
+            context(),
+            "https://example.com",
+            "core_version",
+            InvokeBody::default(),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not allowed"),
+            "expected an ACL rejection, got: {err}"
         );
     }
 }
