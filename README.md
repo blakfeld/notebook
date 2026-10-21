@@ -10,11 +10,12 @@ Cargo.toml              Cargo workspace (shared deps and lints)
 rust-toolchain.toml     pinned Rust toolchain, incl. wasm32-unknown-unknown
 crates/
   notebook-core/        platform-independent library (native + wasm32)
-  notebook-server/      axum server binary (stub)
+  notebook-server/      axum sync server binary
   notebook-app/         Tauri 2 app (desktop window around web/)
 web/                    Svelte 5 + Vite + TypeScript frontend
   src/lib/              components and helpers
   src/platform/         host adapter (Tauri IPC today)
+docs/deployment.md      running the server in production
 scripts/check.sh        every CI check, run locally
 openspec/               specs and planned changes (see TODO.md)
 ```
@@ -57,11 +58,15 @@ version):
 cd crates/notebook-app && cargo tauri dev
 ```
 
-Server stub (logs its version and exits):
+Server, against a local database at `notebook.db` (`--help` lists the
+subcommands):
 
 ```sh
-cargo run -p notebook-server
+NOTEBOOK_PUBLIC_URL=http://localhost:8080 cargo run -p notebook-server -- serve
 ```
+
+See [docs/deployment.md](docs/deployment.md) for configuration, the reverse
+proxy, backups, and upgrades.
 
 `notebook-app` embeds `web/dist` at compile time, so build the frontend before
 any `cargo build`, `clippy`, or `test` that includes it:
