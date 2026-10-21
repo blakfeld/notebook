@@ -3,17 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: &code-paths
-      - "crates/**"
-      - "web/**"
-      - "scripts/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "rust-toolchain.toml"
-      - "rustfmt.toml"
-      - ".github/workflows/**"
   pull_request:
-    paths: *code-paths
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -23,7 +13,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The workflow always runs so the required checks always report. When no
+  # code changed, the jobs below are skipped, which counts as passing.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - "crates/**"
+              - "web/**"
+              - "scripts/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "rust-toolchain.toml"
+              - "rustfmt.toml"
+              - ".github/workflows/**"
+
   web:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -48,7 +62,8 @@ jobs:
           if-no-files-found: error
 
   rust:
-    needs: web
+    needs: [changes, web]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +88,8 @@ jobs:
       - run: cargo test --workspace
 
   wasm:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
