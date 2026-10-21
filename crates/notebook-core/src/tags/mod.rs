@@ -200,4 +200,74 @@ mod tests {
         assert!(TagPath::parse("3d").is_some());
         assert!(TagPath::parse("a./b").is_some());
     }
+
+    #[test]
+    fn rejects_every_trailing_punctuation_character() {
+        for &c in TRAILING_PUNCTUATION {
+            assert_eq!(TagPath::parse(&format!("job{c}")), None, "{c:?}");
+            assert!(TagPath::parse(&format!("a{c}b")).is_some(), "{c:?}");
+        }
+        assert!(TagPath::parse("job-").is_some());
+        assert!(TagPath::parse("job_").is_some());
+    }
+
+    #[test]
+    fn tabs_and_unicode_whitespace_collapse() {
+        let p = TagPath::parse("\treading\t\u{a0} list\u{3000}").unwrap();
+        assert_eq!(segs(&p), ["reading list"]);
+    }
+
+    #[test]
+    fn single_segment_path() {
+        let p = TagPath::parse("work").unwrap();
+        assert_eq!(segs(&p), ["work"]);
+        assert_eq!(p.depth(), 1);
+        assert_eq!(p.to_string(), "work");
+    }
+
+    #[test]
+    fn digit_only_segments_are_allowed_under_a_named_parent() {
+        let p = TagPath::parse("year/2024").unwrap();
+        assert_eq!(segs(&p), ["year", "2024"]);
+    }
+
+    #[test]
+    fn prefix_matching_is_case_insensitive_and_segment_wise() {
+        let upper = TagPath::parse("WORK").unwrap();
+        assert!(upper.is_prefix_of(&TagPath::parse("work/acme").unwrap()));
+        let acme = TagPath::parse("work/acme").unwrap();
+        assert!(!acme.is_prefix_of(&TagPath::parse("work/acmecorp").unwrap()));
+        assert!(!acme.is_prefix_of(&TagPath::parse("acme").unwrap()));
+    }
+
+    #[test]
+    fn ordering_and_hashing_follow_the_lowercase_key() {
+        use std::collections::HashSet;
+
+        let a = TagPath::parse("Alpha").unwrap();
+        let b = TagPath::parse("beta").unwrap();
+        let a_child = TagPath::parse("alpha/x").unwrap();
+        assert!(a < b);
+        assert!(a < a_child);
+        assert!(a_child < b);
+        assert_eq!(a.cmp(&TagPath::parse("ALPHA").unwrap()), Ordering::Equal);
+
+        let set: HashSet<TagPath> = ["Work", "work", "WORK", "work/acme"]
+            .into_iter()
+            .map(|s| TagPath::parse(s).unwrap())
+            .collect();
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn unicode_lowercasing_beyond_ascii() {
+        assert_eq!(
+            TagPath::parse("ΣΟΦΊΑ").unwrap(),
+            TagPath::parse("σοφία").unwrap()
+        );
+        assert_ne!(
+            TagPath::parse("cafe").unwrap(),
+            TagPath::parse("café").unwrap()
+        );
+    }
 }

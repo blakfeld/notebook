@@ -347,4 +347,120 @@ mod tests {
         n.set_body("Final\nbody", T2);
         assert_eq!(n.title(), "Final");
     }
+
+    #[test]
+    fn id_ignores_random_bits_above_80() {
+        let low = NoteId::from_parts(1_000, 0xabc);
+        let high = NoteId::from_parts(1_000, (1 << 80) | 0xabc);
+        assert_eq!(low, high);
+        assert_eq!(NoteId::from_parts(1_000, u128::MAX).to_string().len(), 26);
+    }
+
+    #[test]
+    fn ids_with_the_same_time_order_by_random_bits() {
+        assert!(NoteId::from_parts(1_000, 1) < NoteId::from_parts(1_000, 2));
+        assert_ne!(NoteId::from_parts(1_000, 1), NoteId::from_parts(1_000, 2));
+    }
+
+    #[test]
+    fn id_text_parsing_is_case_insensitive() {
+        let id = NoteId::from_parts(1_700_000_000_000, 0xdead_beef);
+        let text = id.to_string();
+        assert_eq!(text, text.to_uppercase());
+        assert_eq!(text.to_lowercase().parse::<NoteId>(), Ok(id));
+    }
+
+    #[test]
+    fn id_bytes_are_big_endian_ulid() {
+        let id = NoteId::from_parts(0x0102_0304_0506, 0x0708_090a_0b0c_0d0e_0f10);
+        assert_eq!(
+            id.to_bytes(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+    }
+
+    #[test]
+    fn parse_error_is_a_std_error() {
+        let err = "nope".parse::<NoteId>().unwrap_err();
+        assert_eq!(err.to_string(), "invalid note identifier");
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn timestamp_exposes_millis_and_orders() {
+        assert_eq!(Timestamp(-5).as_millis(), -5);
+        assert_eq!(T2.as_millis(), 2_000);
+        assert!(T1 < T2 && T2 < T3);
+    }
+
+    #[test]
+    fn edit_back_and_forth_bumps_updated_each_time() {
+        let mut n = note("a");
+        n.set_body("b", T2);
+        n.set_body("a".to_owned(), T3);
+        assert_eq!(n.body(), "a");
+        assert_eq!(n.updated(), T3);
+    }
+
+    #[test]
+    fn whitespace_only_change_is_an_edit() {
+        let mut n = note("a");
+        n.set_body("a ", T2);
+        assert_eq!(n.updated(), T2);
+    }
+
+    #[test]
+    fn flags_are_independent() {
+        let mut n = note("x");
+        n.set_pinned(true);
+        n.set_archived(true);
+        n.set_archived(false);
+        assert!(n.is_pinned());
+        n.set_trashed(true);
+        n.set_pinned(false);
+        assert!(n.is_trashed() && !n.is_archived());
+    }
+
+    #[test]
+    fn setting_a_flag_twice_is_idempotent() {
+        let mut n = note("x");
+        n.set_pinned(true);
+        n.set_pinned(true);
+        assert!(n.is_pinned());
+        let mut m = note("x");
+        m.set_pinned(true);
+        assert_eq!(n, m);
+    }
+
+    #[test]
+    fn notes_compare_by_every_field() {
+        assert_eq!(note("x"), note("x"));
+        assert_ne!(note("x"), note("y"));
+        assert_ne!(note("x"), Note::new(id(2), "x", T1));
+        assert_ne!(note("x"), Note::new(id(1), "x", T2));
+        let mut trashed = note("x");
+        trashed.set_trashed(true);
+        assert_ne!(note("x"), trashed);
+    }
+
+    #[test]
+    fn more_titles() {
+        let cases = [
+            ("###### Six", "Six"),
+            ("#\tTabbed", "Tabbed"),
+            ("   # Indented", "Indented"),
+            ("# Title#", "Title#"),
+            ("# a ## b", "a ## b"),
+            ("# Spaced   ###   ", "Spaced"),
+            ("#", ""),
+            ("######", ""),
+            ("#######", "#######"),
+            ("- list item\n# heading", "- list item"),
+            ("日本語のタイトル\n本文", "日本語のタイトル"),
+            ("\u{3000}全角\u{3000}", "全角"),
+        ];
+        for (body, title) in cases {
+            assert_eq!(note(body).title(), title, "{body:?}");
+        }
+    }
 }

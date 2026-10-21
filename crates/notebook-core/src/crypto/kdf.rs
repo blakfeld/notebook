@@ -130,4 +130,49 @@ mod tests {
     fn generated_salts_differ() {
         assert_ne!(Salt::generate().unwrap(), Salt::generate().unwrap());
     }
+
+    #[test]
+    fn salt_bytes_round_trip() {
+        let bytes: [u8; SALT_LEN] = std::array::from_fn(|i| i as u8);
+        let salt = Salt::from_bytes(bytes);
+        assert_eq!(salt.as_bytes(), &bytes);
+        assert_eq!(Salt::from_bytes(*salt.as_bytes()), salt);
+        assert_eq!(Salt::generate().unwrap().as_bytes().len(), 16);
+    }
+
+    #[test]
+    fn current_version_round_trips() {
+        let v = KdfVersion::CURRENT;
+        assert_eq!(KdfVersion::from_u8(v.to_u8()), Ok(v));
+        assert_eq!(v.params().output_len(), Some(OUTPUT_LEN));
+    }
+
+    #[test]
+    fn empty_and_non_utf8_passphrases_derive() {
+        derive_auth_secret(b"", &SALT_A, KdfVersion::V1).unwrap();
+        derive_auth_secret(&[0xff, 0xfe, 0x00], &SALT_A, KdfVersion::V1).unwrap();
+    }
+
+    #[test]
+    fn derived_secret_unlocks_a_bundle() {
+        use crate::crypto::{KeyBundle, RecoveryKey, VaultKey};
+        let vault = VaultId::from_parts(1_000, 1);
+        let salt = Salt::generate().unwrap();
+        let auth = derive_auth_secret(b"correct horse", &salt, KdfVersion::CURRENT).unwrap();
+        let bundle = KeyBundle::create(
+            vault,
+            &VaultKey::generate().unwrap(),
+            &auth,
+            &RecoveryKey::generate().unwrap(),
+        )
+        .unwrap();
+
+        let again = derive_auth_secret(b"correct horse", &salt, KdfVersion::CURRENT).unwrap();
+        assert!(bundle.unlock_with_auth(&again).is_ok());
+        let wrong = derive_auth_secret(b"wrong horse", &salt, KdfVersion::CURRENT).unwrap();
+        assert!(matches!(
+            bundle.unlock_with_auth(&wrong),
+            Err(CryptoError::Decrypt)
+        ));
+    }
 }

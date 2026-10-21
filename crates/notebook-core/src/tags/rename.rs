@@ -230,6 +230,133 @@ mod tests {
     }
 
     #[test]
+    fn invalid_old_names_are_rejected() {
+        let notes = [note(1, "#work")];
+        for old in ["/", "a#b", "42", "work.", "a\rb"] {
+            assert_eq!(
+                rename(&notes, old, "job"),
+                Err(RenameError::InvalidName(old.to_owned())),
+                "{old:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn old_name_is_checked_first() {
+        assert_eq!(
+            rename(&[], "42", "43"),
+            Err(RenameError::InvalidName("42".to_owned()))
+        );
+    }
+
+    #[test]
+    fn error_message() {
+        let err = RenameError::InvalidName("a#b".to_owned());
+        assert_eq!(err.to_string(), "invalid tag name: \"a#b\"");
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn empty_note_set() {
+        assert_eq!(rename(&[], "work", "job").unwrap(), []);
+    }
+
+    #[test]
+    fn names_are_normalized_before_use() {
+        assert_eq!(
+            one("#work", "  Work ", " clients //  acme ").as_deref(),
+            Some("#clients/acme")
+        );
+    }
+
+    #[test]
+    fn every_occurrence_in_a_note_is_rewritten() {
+        assert_eq!(
+            one("#work a #WORK b #work/x c #work", "work", "job").as_deref(),
+            Some("#job a #job b #job/x c #job")
+        );
+    }
+
+    #[test]
+    fn results_follow_input_order() {
+        let notes = [note(3, "#work"), note(1, "x"), note(2, "#work/a")];
+        assert_eq!(
+            rename(&notes, "work", "job").unwrap(),
+            [(id(3), "#job".to_owned()), (id(2), "#job/a".to_owned())]
+        );
+    }
+
+    #[test]
+    fn nested_old_name_only_matches_that_subtree() {
+        assert_eq!(
+            one("#work #work/acme/q3 #work/beta", "work/acme", "acme").as_deref(),
+            Some("#work #acme/q3 #work/beta")
+        );
+        assert_eq!(one("#work", "work/acme", "acme"), None);
+    }
+
+    #[test]
+    fn multi_word_segment_anywhere_uses_the_closed_form() {
+        assert_eq!(
+            one("#work/x y", "work", "side jobs").as_deref(),
+            Some("#side jobs/x# y")
+        );
+        assert_eq!(
+            one("#work/acme# x", "work", "job").as_deref(),
+            Some("#job/acme# x")
+        );
+    }
+
+    #[test]
+    fn rewritten_tags_use_normalized_spelling() {
+        assert_eq!(
+            one("#work//acme/ x", "work", "job").as_deref(),
+            Some("#job/acme/ x")
+        );
+        assert_eq!(
+            one("#side   gig# x", "side gig", "ideas").as_deref(),
+            Some("#ideas x")
+        );
+    }
+
+    #[test]
+    fn punctuation_and_surroundings_are_kept() {
+        assert_eq!(
+            one("Done: #work). Next", "work", "job").as_deref(),
+            Some("Done: #job). Next")
+        );
+        assert_eq!(
+            one("## Plans #work ##", "work", "job").as_deref(),
+            Some("## Plans #job ##")
+        );
+        assert_eq!(
+            one("see https://x.com/#work and #work", "work", "job").as_deref(),
+            Some("see https://x.com/#work and #job")
+        );
+    }
+
+    #[test]
+    fn tag_only_in_code_is_omitted() {
+        assert_eq!(one("`#work` and\n\n    #work\n", "work", "job"), None);
+    }
+
+    #[test]
+    fn case_only_rename_changes_spelling() {
+        assert_eq!(
+            one("#work/acme #WORK", "work", "Work").as_deref(),
+            Some("#Work/acme #Work")
+        );
+        assert_eq!(one("#Work", "work", "Work"), None);
+    }
+
+    #[test]
+    fn notes_are_not_modified() {
+        let notes = [note(1, "#work")];
+        rename(&notes, "work", "job").unwrap();
+        assert_eq!(notes[0].body(), "#work");
+    }
+
+    #[test]
     fn round_trip() {
         let bodies = [
             "# Notes #work\nSee #work/acme, #Work/beta# and `#work`.\n\n```\n#work\n```\n#workshop #home/work",

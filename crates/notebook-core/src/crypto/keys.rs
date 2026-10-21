@@ -304,6 +304,133 @@ mod tests {
     }
 
     #[test]
+    fn payload_kinds_are_pinned_and_distinct() {
+        assert_eq!(PayloadKind::NotePayload.to_u8(), 1);
+        assert_eq!(PayloadKind::CrdtUpdate.to_u8(), 2);
+        assert_eq!(PayloadKind::CrdtSnapshot.to_u8(), 3);
+        assert_eq!(KIND_WRAPPED_NOTE_KEY, 16);
+    }
+
+    #[test]
+    fn every_kind_pair_is_separated() {
+        let key = NoteKey::generate().unwrap();
+        let kinds = [
+            PayloadKind::NotePayload,
+            PayloadKind::CrdtUpdate,
+            PayloadKind::CrdtSnapshot,
+        ];
+        for written in kinds {
+            let sealed = key.encrypt(V, note(1), written, b"x").unwrap();
+            for read in kinds {
+                let result = key.decrypt(V, note(1), read, &sealed);
+                if read == written {
+                    assert_eq!(&*result.unwrap(), b"x");
+                } else {
+                    assert_eq!(result, Err(CryptoError::Decrypt), "{written:?} as {read:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ciphertext_carries_the_envelope_overhead() {
+        let key = NoteKey::generate().unwrap();
+        let sealed = key
+            .encrypt(V, note(1), PayloadKind::NotePayload, b"hello")
+            .unwrap();
+        assert_eq!(sealed.len(), 5 + envelope::ENVELOPE_OVERHEAD);
+        assert_eq!(sealed[0], envelope::ENVELOPE_VERSION);
+
+        let wrapped = VaultKey::generate()
+            .unwrap()
+            .wrap_note_key(V, note(1), &key)
+            .unwrap();
+        assert_eq!(wrapped.len(), 32 + envelope::ENVELOPE_OVERHEAD);
+    }
+
+    #[test]
+    fn wrapping_is_randomized() {
+        let vault_key = VaultKey::generate().unwrap();
+        let note_key = NoteKey::generate().unwrap();
+        let a = vault_key.wrap_note_key(V, note(1), &note_key).unwrap();
+        let b = vault_key.wrap_note_key(V, note(1), &note_key).unwrap();
+        assert_ne!(a, b);
+        let ka = vault_key.unwrap_note_key(V, note(1), &a).unwrap();
+        let kb = vault_key.unwrap_note_key(V, note(1), &b).unwrap();
+        assert_eq!(ka.0.as_bytes(), kb.0.as_bytes());
+        assert_eq!(ka.0.as_bytes(), note_key.0.as_bytes());
+    }
+
+    #[test]
+    fn unwrapping_a_payload_of_the_wrong_length_is_malformed() {
+        let vault_key = VaultKey::generate().unwrap();
+        for len in [0, 31, 33] {
+            let wrapped = envelope::seal(
+                vault_key.0.as_bytes(),
+                &wrap_context(V, note(1)),
+                &vec![0; len],
+            )
+            .unwrap();
+            assert!(matches!(
+                vault_key.unwrap_note_key(V, note(1), &wrapped),
+                Err(CryptoError::Malformed)
+            ));
+        }
+    }
+
+    #[test]
+    fn malformed_wrapped_key_is_rejected() {
+        let vault_key = VaultKey::generate().unwrap();
+        let wrapped = vault_key
+            .wrap_note_key(V, note(1), &NoteKey::generate().unwrap())
+            .unwrap();
+        assert!(matches!(
+            vault_key.unwrap_note_key(V, note(1), &wrapped[..10]),
+            Err(CryptoError::Malformed)
+        ));
+        let mut bad_version = wrapped;
+        bad_version[0] = 2;
+        assert!(matches!(
+            vault_key.unwrap_note_key(V, note(1), &bad_version),
+            Err(CryptoError::UnsupportedVersion(2))
+        ));
+    }
+
+    #[test]
+    fn decrypt_rejects_malformed_and_unsupported_input() {
+        let key = NoteKey::generate().unwrap();
+        let sealed = key
+            .encrypt(V, note(1), PayloadKind::NotePayload, b"x")
+            .unwrap();
+        assert_eq!(
+            key.decrypt(V, note(1), PayloadKind::NotePayload, &[]),
+            Err(CryptoError::Malformed)
+        );
+        let mut bad_algorithm = sealed;
+        bad_algorithm[1] = 2;
+        assert_eq!(
+            key.decrypt(V, note(1), PayloadKind::NotePayload, &bad_algorithm),
+            Err(CryptoError::UnsupportedAlgorithm(2))
+        );
+    }
+
+    #[test]
+    fn symmetric_key_from_slice_checks_length() {
+        assert!(matches!(
+            SymmetricKey::from_slice(&[0; 31]),
+            Err(CryptoError::Malformed)
+        ));
+        assert!(matches!(
+            SymmetricKey::from_slice(&[0; 33]),
+            Err(CryptoError::Malformed)
+        ));
+        assert_eq!(
+            SymmetricKey::from_slice(&[7; 32]).unwrap().as_bytes(),
+            &[7; 32]
+        );
+    }
+
+    #[test]
     fn debug_output_is_redacted() {
         let vault_key = VaultKey::generate().unwrap();
         let note_key = NoteKey::generate().unwrap();

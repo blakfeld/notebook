@@ -221,4 +221,127 @@ mod tests {
         let key = RecoveryKey::generate().unwrap();
         assert_eq!(format!("{key:?}"), "RecoveryKey(..)");
     }
+
+    /// Cross-checked against an independent Python implementation of the
+    /// encoding and checksum.
+    #[test]
+    fn fixed_encodings() {
+        let cases = [
+            ([0u8; RANDOM_LEN], "0000-0000-0000-0000-0000-0000-00DC-5W25"),
+            (
+                std::array::from_fn(|i| i as u8),
+                "000G-40R4-0M30-E209-185G-R38E-1YSS-08BQ",
+            ),
+        ];
+        for (random, text) in cases {
+            assert_eq!(*RecoveryKey(random).to_display(), text);
+            assert_eq!(RecoveryKey::parse(text).unwrap().0, random);
+        }
+    }
+
+    #[test]
+    fn display_is_uppercase_and_parse_accepts_any_grouping() {
+        let key = RecoveryKey::generate().unwrap();
+        let shown = key.to_display();
+        assert_eq!(*shown, shown.to_uppercase());
+        let compact: String = shown.chars().filter(|&c| c != '-').collect();
+        assert_eq!(RecoveryKey::parse(&compact).unwrap().0, key.0);
+        let spread: String = compact.chars().flat_map(|c| [c, '-', '\t']).collect();
+        assert_eq!(RecoveryKey::parse(&spread).unwrap().0, key.0);
+    }
+
+    #[test]
+    fn lookalike_letters_decode_as_digits() {
+        for (c, digit) in [('I', 1), ('i', 1), ('L', 1), ('l', 1), ('O', 0), ('o', 0)] {
+            assert_eq!(decode_char(c), Some(digit), "{c}");
+        }
+        for (i, &c) in ALPHABET.iter().enumerate() {
+            assert_eq!(decode_char(c as char), Some(i as u8));
+            assert_eq!(decode_char(c.to_ascii_lowercase() as char), Some(i as u8));
+        }
+        for c in ['U', 'u', '_', '+', 'é', '０'] {
+            assert_eq!(decode_char(c), None, "{c}");
+        }
+    }
+
+    #[test]
+    fn five_bit_groups_round_trip() {
+        let mut bytes = [0u8; RANDOM_LEN + CHECKSUM_LEN];
+        for i in 0..ENCODED_LEN {
+            write_5_bits(&mut bytes, i, (i as u8 * 7) % 32);
+        }
+        for i in 0..ENCODED_LEN {
+            assert_eq!(read_5_bits(&bytes, i), (i as u8 * 7) % 32);
+        }
+        assert_eq!(read_5_bits(&[0b1010_1100, 0], 0), 0b10101);
+        assert_eq!(read_5_bits(&[0b1010_1100, 0b0100_0000], 1), 0b10001);
+    }
+
+    #[test]
+    fn checksum_is_domain_separated_sha256_prefix() {
+        let random = [0u8; RANDOM_LEN];
+        let digest = Sha256::digest([CHECKSUM_DOMAIN, &random].concat());
+        assert_eq!(checksum(&random), digest[..CHECKSUM_LEN]);
+        assert_ne!(
+            checksum(&random)[..],
+            Sha256::digest(random)[..CHECKSUM_LEN]
+        );
+    }
+
+    #[test]
+    fn swapped_characters_are_detected() {
+        let shown = RecoveryKey::generate().unwrap().to_display();
+        let chars: Vec<char> = shown.chars().filter(|&c| c != '-').collect();
+        for i in 0..chars.len() - 1 {
+            if chars[i] == chars[i + 1] {
+                continue;
+            }
+            let mut swapped = chars.clone();
+            swapped.swap(i, i + 1);
+            let text: String = swapped.into_iter().collect();
+            assert_eq!(
+                RecoveryKey::parse(&text).unwrap_err(),
+                CryptoError::InvalidRecoveryKey,
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_ascii_input_is_rejected() {
+        let shown = RecoveryKey::generate().unwrap().to_display();
+        let text = shown.replacen('-', "é", 1);
+        assert_eq!(
+            RecoveryKey::parse(&text).unwrap_err(),
+            CryptoError::InvalidRecoveryKey
+        );
+    }
+
+    #[test]
+    fn wrapping_key_depends_on_key_and_vault() {
+        let v1 = VaultId::from_parts(1_000, 1);
+        let v2 = VaultId::from_parts(1_000, 2);
+        let a = RecoveryKey([1; RANDOM_LEN]);
+        let b = RecoveryKey([2; RANDOM_LEN]);
+        assert_eq!(a.wrapping_key(v1).as_bytes(), a.wrapping_key(v1).as_bytes());
+        assert_ne!(a.wrapping_key(v1).as_bytes(), a.wrapping_key(v2).as_bytes());
+        assert_ne!(a.wrapping_key(v1).as_bytes(), b.wrapping_key(v1).as_bytes());
+    }
+
+    #[test]
+    fn parsed_key_unlocks_the_bundle() {
+        use crate::crypto::{AuthSecret, KeyBundle, VaultKey};
+        let vault = VaultId::from_parts(1_000, 1);
+        let recovery = RecoveryKey::generate().unwrap();
+        let bundle = KeyBundle::create(
+            vault,
+            &VaultKey::generate().unwrap(),
+            &AuthSecret::from_bytes(&[1; 32]).unwrap(),
+            &recovery,
+        )
+        .unwrap();
+        let typed = recovery.to_display().to_lowercase().replace('-', " ");
+        let parsed = RecoveryKey::parse(&typed).unwrap();
+        assert!(bundle.unlock_with_recovery(&parsed).is_ok());
+    }
 }
