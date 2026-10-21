@@ -281,4 +281,162 @@ mod tests {
         assert_eq!(distinct("#todo first, #TODO second"), ["todo"]);
         assert_eq!(distinct("#b #a #b"), ["b", "a"]);
     }
+
+    fn ranges(body: &str) -> Vec<&str> {
+        parse(body).into_iter().map(|o| &body[o.range]).collect()
+    }
+
+    fn forms(body: &str) -> Vec<TagForm> {
+        parse(body).into_iter().map(|o| o.form).collect()
+    }
+
+    #[test]
+    fn empty_and_tagless_bodies() {
+        assert!(parse("").is_empty());
+        assert!(tags_of("").is_empty());
+        assert!(parse("just some text").is_empty());
+        assert!(parse("ends with #").is_empty());
+    }
+
+    #[test]
+    fn first_spelling_is_kept() {
+        assert_eq!(distinct("#Todo and #todo"), ["Todo"]);
+        assert_eq!(distinct("#work/Acme #Work/acme"), ["work/Acme"]);
+    }
+
+    #[test]
+    fn every_trailing_punctuation_character_is_excluded() {
+        for &c in crate::tags::TRAILING_PUNCTUATION {
+            let body = format!("#tag{c}");
+            assert_eq!(ranges(&body), ["#tag"], "{body:?}");
+            let body = format!("#tag{c}{c}{c} more");
+            assert_eq!(ranges(&body), ["#tag"], "{body:?}");
+        }
+    }
+
+    #[test]
+    fn punctuation_inside_a_name_is_kept() {
+        assert_eq!(names("#e.g.x and #a:b"), ["e.g.x", "a:b"]);
+        assert_eq!(
+            names("#to-do #snake_case #c++"),
+            ["to-do", "snake_case", "c++"]
+        );
+    }
+
+    #[test]
+    fn tag_boundaries() {
+        assert_eq!(names("a\t#tab"), ["tab"]);
+        assert_eq!(names("line\r\n#crlf\r\nnext"), ["crlf"]);
+        assert_eq!(names("nbsp\u{a0}#tag"), ["tag"]);
+        assert_eq!(names("#a #b\t#c\n#d"), ["a", "b", "c", "d"]);
+        assert_eq!(names("#end"), ["end"]);
+        assert_eq!(names("x#y"), Vec::<String>::new());
+        assert_eq!(names("[#link](u) \"#quoted\""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn markdown_containers_do_not_hide_tags() {
+        assert_eq!(names("- #item\n* #star\n1. #num"), ["item", "star", "num"]);
+        assert_eq!(names("> #quoted"), ["quoted"]);
+        assert_eq!(names("**#bold**"), Vec::<String>::new());
+        assert_eq!(names("Text **bold** #after"), ["after"]);
+    }
+
+    #[test]
+    fn ranges_are_byte_offsets() {
+        let body = "é日 #tag";
+        let occ = parse(body);
+        assert_eq!(occ[0].range, 6..10);
+        assert_eq!(&body[occ[0].range.clone()], "#tag");
+
+        let body = "#日本語 x";
+        assert_eq!(parse(body)[0].range, 0..10);
+    }
+
+    #[test]
+    fn closed_form_boundaries() {
+        assert_eq!(ranges("#ideas#."), ["#ideas#"]);
+        assert_eq!(forms("#ideas#."), [TagForm::Closed]);
+        assert_eq!(ranges("#ideas#"), ["#ideas#"]);
+        assert_eq!(ranges("#ideas#\nnext"), ["#ideas#"]);
+        assert_eq!(ranges("#a/b# x"), ["#a/b#"]);
+        assert_eq!(forms("#a/b# x"), [TagForm::Closed]);
+    }
+
+    #[test]
+    fn hash_not_at_a_boundary_ends_a_bare_tag() {
+        assert_eq!(ranges("#ideas#x"), ["#ideas"]);
+        assert_eq!(forms("#ideas#x"), [TagForm::Bare]);
+        assert_eq!(names("#a#b #c"), ["a", "c"]);
+    }
+
+    #[test]
+    fn trimmed_name_is_not_closed() {
+        // The `#` after trimmed punctuation isn't directly after the name.
+        assert_eq!(ranges("#ideas.# x"), ["#ideas"]);
+        assert_eq!(forms("#ideas.# x"), [TagForm::Bare]);
+    }
+
+    #[test]
+    fn trailing_slashes_are_outside_the_range() {
+        assert_eq!(ranges("#a/b/ x"), ["#a/b"]);
+        assert_eq!(ranges("#a/b/. x"), ["#a/b"]);
+    }
+
+    #[test]
+    fn multi_word_ranges_and_boundaries() {
+        assert_eq!(ranges("#side projects.# ok"), ["#side projects.#"]);
+        assert_eq!(ranges("(see #big idea#)"), ["#big idea#"]);
+        assert_eq!(ranges("#big idea#\r\nnext"), ["#big idea#"]);
+        assert_eq!(forms("#big idea#"), [TagForm::MultiWord]);
+        assert_eq!(names("#a\tb#"), ["a b"]);
+    }
+
+    #[test]
+    fn multi_word_candidates_that_fall_back() {
+        // Whitespace before the closing `#`.
+        assert_eq!(names("#a b # c"), ["a"]);
+        // Closing `#` followed by a non-boundary.
+        assert_eq!(names("#a b#c d"), ["a"]);
+        // A `#` with whitespace before it ends the first word instead.
+        assert_eq!(names("#work and #home#"), ["work", "home"]);
+    }
+
+    #[test]
+    fn multi_word_with_two_tags_on_a_line() {
+        assert_eq!(
+            names("#one two# and #three four#"),
+            ["one two", "three four"]
+        );
+        assert_eq!(names("#one two# #three"), ["one two", "three"]);
+    }
+
+    #[test]
+    fn more_code_forms() {
+        assert_eq!(names("~~~\n#fake\n~~~\n#real"), ["real"]);
+        assert_eq!(names("``#a ` #b``  #c"), ["c"]);
+        assert_eq!(names("```\n#open fence never closes"), Vec::<String>::new());
+        assert_eq!(names("#before `code` #after"), ["before", "after"]);
+        assert_eq!(
+            names("- item\n\n      #indented in list\n\n#real"),
+            ["real"]
+        );
+    }
+
+    #[test]
+    fn tag_stops_at_adjacent_code() {
+        assert_eq!(ranges("#a`b`"), ["#a"]);
+        assert_eq!(names("#multi word`#x`#"), ["multi"]);
+    }
+
+    #[test]
+    fn code_ranges_are_sorted_and_disjoint() {
+        let body = "`a` and `b`\n\n```\nc\n```\n\n    d\n";
+        let ranges = code_ranges(body);
+        assert_eq!(ranges.len(), 4);
+        for pair in ranges.windows(2) {
+            assert!(pair[0].end <= pair[1].start);
+        }
+        assert!(code_ranges("no code here").is_empty());
+    }
 }

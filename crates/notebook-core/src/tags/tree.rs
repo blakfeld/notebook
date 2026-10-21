@@ -211,4 +211,98 @@ mod tests {
         assert!(tree.find(&path("home")).is_none());
         assert!(tree.find(&path("work/other")).is_none());
     }
+
+    #[test]
+    fn empty_tree() {
+        let tree = TagTree::build(&[]);
+        assert!(tree.roots().is_empty());
+        assert_eq!(tree, TagTree::default());
+        assert!(tree.find(&path("work")).is_none());
+        assert_eq!(TagTree::build(&[note(1, 1, "no tags")]), TagTree::default());
+    }
+
+    #[test]
+    fn find_descends_case_insensitively() {
+        let tree = TagTree::build(&[note(1, 1, "#Work/Acme/Q3")]);
+        let node = tree.find(&path("work/acme/q3")).unwrap();
+        assert_eq!(node.name, "Q3");
+        assert_eq!(node.path.to_string(), "Work/Acme/Q3");
+        assert!(node.children.is_empty());
+        assert!(tree.find(&path("work/acme/q3/deeper")).is_none());
+        assert!(tree.find(&path("acme")).is_none());
+    }
+
+    #[test]
+    fn each_segment_picks_its_own_spelling() {
+        let tree = TagTree::build(&[
+            note(1, 1, "#Work/ACME"),
+            note(2, 2, "#work/other"),
+            note(3, 0, "#WORK/acme"),
+        ]);
+        let work = &tree.roots()[0];
+        assert_eq!(work.name, "work");
+        assert_eq!(names(&work.children), ["ACME", "other"]);
+        assert_eq!(work.children[0].path.to_string(), "work/ACME");
+    }
+
+    #[test]
+    fn spelling_comes_from_the_newest_note_regardless_of_order() {
+        let notes = [note(1, 5, "#Tag"), note(2, 1, "#tag"), note(3, 3, "#TAG")];
+        for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+            let shuffled: Vec<Note> = order.iter().map(|&i| notes[i].clone()).collect();
+            assert_eq!(names(TagTree::build(&shuffled).roots()), ["Tag"]);
+        }
+    }
+
+    #[test]
+    fn parent_lists_notes_from_all_children_in_order() {
+        let tree = TagTree::build(&[
+            note(1, 1, "#work/a"),
+            note(2, 3, "#work/b"),
+            note(3, 2, "#work/a #work/b"),
+        ]);
+        assert_eq!(
+            tree.find(&path("work")).unwrap().notes,
+            [id(2), id(3), id(1)]
+        );
+        assert_eq!(tree.find(&path("work/a")).unwrap().notes, [id(3), id(1)]);
+        assert_eq!(tree.find(&path("work/b")).unwrap().notes, [id(2), id(3)]);
+    }
+
+    #[test]
+    fn nested_sibling_order() {
+        let tree = TagTree::build(&[note(1, 1, "#p/zeta #p/Alpha #p/beta")]);
+        assert_eq!(names(&tree.roots()[0].children), ["Alpha", "beta", "zeta"]);
+    }
+
+    #[test]
+    fn pinned_notes_contribute_normally() {
+        let mut pinned = note(1, 1, "#work");
+        pinned.set_pinned(true);
+        let tree = TagTree::build(&[pinned, note(2, 2, "#work")]);
+        assert_eq!(tree.roots()[0].notes, [id(2), id(1)]);
+    }
+
+    #[test]
+    fn tags_in_code_do_not_appear() {
+        let tree = TagTree::build(&[note(1, 1, "`#code` and\n```\n#fenced\n```\n#real")]);
+        assert_eq!(names(tree.roots()), ["real"]);
+    }
+
+    #[test]
+    fn multi_word_tags_become_nodes() {
+        let tree = TagTree::build(&[note(1, 1, "#reading list/to buy#")]);
+        let node = tree.find(&path("reading list/to buy")).unwrap();
+        assert_eq!(node.name, "to buy");
+        assert_eq!(tree.roots()[0].name, "reading list");
+    }
+
+    #[test]
+    fn archived_note_does_not_affect_spelling() {
+        let mut newest = note(2, 9, "#WORK");
+        newest.set_archived(true);
+        let tree = TagTree::build(&[note(1, 1, "#work"), newest]);
+        assert_eq!(names(tree.roots()), ["work"]);
+        assert_eq!(tree.roots()[0].notes, [id(1)]);
+    }
 }

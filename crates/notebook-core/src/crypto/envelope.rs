@@ -218,6 +218,89 @@ mod tests {
         assert_eq!(open(&[8; 32], &ctx(), &sealed), Err(CryptoError::Decrypt));
     }
 
+    #[test]
+    fn short_input_is_malformed() {
+        for len in [0, 1, 2, ENVELOPE_OVERHEAD - 1] {
+            let mut bytes = vec![0u8; len];
+            if len >= 2 {
+                bytes[0] = ENVELOPE_VERSION;
+                bytes[1] = ALGORITHM_XCHACHA20POLY1305;
+            }
+            assert_eq!(
+                open(&KEY, &ctx(), &bytes),
+                Err(CryptoError::Malformed),
+                "{len}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimum_length_envelope_is_an_empty_plaintext() {
+        let sealed = seal(&KEY, &ctx(), b"").unwrap();
+        assert_eq!(sealed.len(), ENVELOPE_OVERHEAD);
+        assert!(open(&KEY, &ctx(), &sealed).unwrap().is_empty());
+
+        let mut forged = sealed;
+        forged[ENVELOPE_OVERHEAD - 1] ^= 1;
+        assert_eq!(open(&KEY, &ctx(), &forged), Err(CryptoError::Decrypt));
+    }
+
+    #[test]
+    fn version_is_checked_before_algorithm() {
+        let mut bad = seal(&KEY, &ctx(), b"x").unwrap();
+        bad[0] = 0;
+        bad[1] = 0;
+        assert_eq!(
+            open(&KEY, &ctx(), &bad),
+            Err(CryptoError::UnsupportedVersion(0))
+        );
+    }
+
+    #[test]
+    fn nonce_is_stored_after_the_header() {
+        let nonce = [0x5a; NONCE_LEN];
+        let sealed = seal_with_nonce(&KEY, &ctx(), &nonce, b"x").unwrap();
+        assert_eq!(&sealed[HEADER_LEN..HEADER_LEN + NONCE_LEN], &nonce);
+    }
+
+    #[test]
+    fn same_nonce_and_context_is_deterministic() {
+        let nonce = [1; NONCE_LEN];
+        let a = seal_with_nonce(&KEY, &ctx(), &nonce, b"x").unwrap();
+        let b = seal_with_nonce(&KEY, &ctx(), &nonce, b"x").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn aad_layout() {
+        let ctx = Context {
+            vault: VaultId::from_bytes([0x11; 16]),
+            kind: 0x22,
+            note: Some(NoteId::from_parts(
+                0x0102_0304_0506,
+                0x0708_090a_0b0c_0d0e_0f10,
+            )),
+        };
+        let mut expected = b"notebook/v1/aad".to_vec();
+        expected.extend([1, 1]);
+        expected.extend([0x11; 16]);
+        expected.push(0x22);
+        expected.extend(1..=16u8);
+        assert_eq!(ctx.aad(1, 1), expected);
+
+        let vault_level = Context { note: None, ..ctx };
+        assert_eq!(&vault_level.aad(1, 1)[expected.len() - 16..], &[0; 16]);
+        assert_eq!(vault_level.aad(1, 1).len(), expected.len());
+    }
+
+    #[test]
+    fn large_plaintext_round_trips() {
+        let plaintext: Vec<u8> = (0..1 << 20).map(|i| (i % 251) as u8).collect();
+        let sealed = seal(&KEY, &ctx(), &plaintext).unwrap();
+        assert_eq!(sealed.len(), plaintext.len() + ENVELOPE_OVERHEAD);
+        assert_eq!(*open(&KEY, &ctx(), &sealed).unwrap(), plaintext);
+    }
+
     /// Pins the exact bytes so every target and dependency version agrees.
     #[test]
     fn fixed_test_vector() {

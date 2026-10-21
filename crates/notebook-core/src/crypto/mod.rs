@@ -181,6 +181,73 @@ mod tests {
     }
 
     #[test]
+    fn vault_id_bytes_are_big_endian_ulid() {
+        let id = VaultId::from_parts(0x0102_0304_0506, 0x0708_090a_0b0c_0d0e_0f10);
+        assert_eq!(
+            id.to_bytes(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        assert_eq!(
+            id.to_string(),
+            VaultId::from_bytes(id.to_bytes()).to_string()
+        );
+    }
+
+    #[test]
+    fn vault_ids_order_by_creation_time() {
+        let earlier = VaultId::from_parts(1_000, u128::MAX);
+        let later = VaultId::from_parts(2_000, 0);
+        assert!(earlier < later);
+        assert!(earlier.to_string() < later.to_string());
+    }
+
+    #[test]
+    fn parse_vault_id_error_is_a_std_error() {
+        let err = "nope".parse::<VaultId>().unwrap_err();
+        assert_eq!(err.to_string(), "invalid vault identifier");
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn error_messages() {
+        let cases = [
+            (CryptoError::Random, "secure random source failed"),
+            (CryptoError::Decrypt, "decryption failed"),
+            (
+                CryptoError::UnsupportedVersion(7),
+                "unsupported ciphertext version 7",
+            ),
+            (
+                CryptoError::UnsupportedAlgorithm(9),
+                "unsupported ciphertext algorithm 9",
+            ),
+            (CryptoError::Malformed, "malformed ciphertext or key bundle"),
+            (
+                CryptoError::SecretTooShort,
+                "auth secret must be at least 32 bytes",
+            ),
+            (CryptoError::InvalidRecoveryKey, "invalid recovery key"),
+            (
+                CryptoError::UnsupportedKdfVersion(3),
+                "unsupported key derivation version 3",
+            ),
+            (CryptoError::Kdf, "key derivation failed"),
+        ];
+        for (err, message) in cases {
+            assert_eq!(err.to_string(), message);
+            let _: &dyn std::error::Error = &err;
+        }
+    }
+
+    #[test]
+    fn random_fill_handles_empty_and_large_buffers() {
+        fill_random(&mut []).unwrap();
+        let mut big = vec![0u8; 4096];
+        fill_random(&mut big).unwrap();
+        assert!(big.iter().any(|&b| b != 0));
+    }
+
+    #[test]
     fn random_fill_produces_different_bytes() {
         let mut a = [0u8; 32];
         let mut b = [0u8; 32];

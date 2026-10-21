@@ -309,6 +309,121 @@ mod tests {
     }
 
     #[test]
+    fn byte_layout() {
+        let f = fixture();
+        let bytes = f.bundle.to_bytes();
+        assert_eq!(bytes[0], BUNDLE_VERSION);
+        assert_eq!(&bytes[1..17], &f.vault.to_bytes());
+        assert_eq!(&bytes[17..19], &[0, 74]);
+        assert_eq!(&bytes[19..93], &f.bundle.auth_entry[..]);
+        assert_eq!(&bytes[93..95], &[0, 74]);
+        assert_eq!(&bytes[95..], &f.bundle.recovery_entry[..]);
+    }
+
+    #[test]
+    fn truncations_are_malformed() {
+        let bytes = fixture().bundle.to_bytes();
+        for len in 0..bytes.len() {
+            assert_eq!(
+                KeyBundle::from_bytes(&bytes[..len]),
+                Err(CryptoError::Malformed),
+                "length {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn length_prefix_past_the_end_is_malformed() {
+        let mut bytes = fixture().bundle.to_bytes();
+        bytes[17..19].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(KeyBundle::from_bytes(&bytes), Err(CryptoError::Malformed));
+    }
+
+    #[test]
+    fn parsing_accepts_any_entry_lengths() {
+        let mut bytes = vec![BUNDLE_VERSION];
+        bytes.extend([0x11; 16]);
+        bytes.extend([0, 0, 0, 3, 1, 2, 3]);
+        let bundle = KeyBundle::from_bytes(&bytes).unwrap();
+        assert!(bundle.auth_entry.is_empty());
+        assert_eq!(bundle.recovery_entry, [1, 2, 3]);
+        assert_eq!(bundle.to_bytes(), bytes);
+
+        let auth = AuthSecret::from_bytes(&[3; 64]).unwrap();
+        assert!(matches!(
+            bundle.unlock_with_auth(&auth),
+            Err(CryptoError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn tampered_entries_fail_to_unlock() {
+        let f = fixture();
+        let bytes = f.bundle.to_bytes();
+        for i in 19..bytes.len() {
+            if (93..95).contains(&i) {
+                continue;
+            }
+            let mut bad = bytes.clone();
+            bad[i] ^= 1;
+            let bundle = KeyBundle::from_bytes(&bad).unwrap();
+            let result = if i < 93 {
+                bundle.unlock_with_auth(&f.auth)
+            } else {
+                bundle.unlock_with_recovery(&f.recovery)
+            };
+            assert!(result.is_err(), "byte {i}");
+        }
+    }
+
+    #[test]
+    fn unwrapped_value_of_the_wrong_length_is_malformed() {
+        let f = fixture();
+        let ctx = Context {
+            vault: f.vault,
+            kind: KIND_VAULT_KEY_AUTH,
+            note: None,
+        };
+        let entry =
+            envelope::seal(f.auth.wrapping_key(f.vault).as_bytes(), &ctx, &[0; 16]).unwrap();
+        let bundle = KeyBundle {
+            auth_entry: entry,
+            ..f.bundle.clone()
+        };
+        assert!(matches!(
+            bundle.unlock_with_auth(&f.auth),
+            Err(CryptoError::Malformed)
+        ));
+    }
+
+    #[test]
+    fn creating_twice_gives_different_bytes_for_the_same_key() {
+        let f = fixture();
+        let again = KeyBundle::create(f.vault, &f.vault_key, &f.auth, &f.recovery).unwrap();
+        assert_ne!(again.to_bytes(), f.bundle.to_bytes());
+        assert_same_vault_key(&f, &again.unlock_with_auth(&f.auth).unwrap());
+    }
+
+    #[test]
+    fn vault_key_kinds_differ_from_note_kinds() {
+        assert_ne!(KIND_VAULT_KEY_AUTH, KIND_VAULT_KEY_RECOVERY);
+        for kind in [KIND_VAULT_KEY_AUTH, KIND_VAULT_KEY_RECOVERY] {
+            assert!(![1, 2, 3, crate::crypto::keys::KIND_WRAPPED_NOTE_KEY].contains(&kind));
+        }
+    }
+
+    #[test]
+    fn rewrap_survives_serialization() {
+        let mut f = fixture();
+        let new_auth = AuthSecret::from_bytes(&[9; 64]).unwrap();
+        f.bundle.rewrap_auth(&f.vault_key, &new_auth).unwrap();
+        let parsed = KeyBundle::from_bytes(&f.bundle.to_bytes()).unwrap();
+        assert_eq!(parsed.vault_id(), f.vault);
+        assert_same_vault_key(&f, &parsed.unlock_with_auth(&new_auth).unwrap());
+        assert!(parsed.unlock_with_auth(&f.auth).is_err());
+    }
+
+    #[test]
     fn passphrase_change_rewraps_only_the_auth_entry() {
         let mut f = fixture();
         let recovery_entry = f.bundle.recovery_entry.clone();

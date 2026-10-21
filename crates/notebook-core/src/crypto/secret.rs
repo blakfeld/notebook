@@ -91,4 +91,56 @@ mod tests {
         let secret = AuthSecret::from_bytes(&[0xab; 32]).unwrap();
         assert_eq!(format!("{secret:?}"), "AuthSecret(..)");
     }
+
+    #[test]
+    fn minimum_length_is_32_bytes() {
+        assert_eq!(MIN_AUTH_SECRET_LEN, 32);
+        assert_eq!(
+            AuthSecret::from_bytes(&[]).unwrap_err(),
+            CryptoError::SecretTooShort
+        );
+    }
+
+    #[test]
+    fn secret_bytes_are_copied_exactly() {
+        let bytes: Vec<u8> = (0..100).collect();
+        assert_eq!(AuthSecret::from_bytes(&bytes).unwrap().0, bytes);
+    }
+
+    #[test]
+    fn different_secrets_give_different_keys() {
+        let v = VaultId::from_parts(1_000, 1);
+        let a = AuthSecret::from_bytes(&[1; 32]).unwrap();
+        let b = AuthSecret::from_bytes(&[2; 32]).unwrap();
+        let longer = AuthSecret::from_bytes(&[1; 33]).unwrap();
+        assert_ne!(a.wrapping_key(v).as_bytes(), b.wrapping_key(v).as_bytes());
+        assert_ne!(
+            a.wrapping_key(v).as_bytes(),
+            longer.wrapping_key(v).as_bytes()
+        );
+    }
+
+    /// Cross-checked against an independent HKDF-SHA256 implementation.
+    #[test]
+    fn fixed_derivation_vectors() {
+        let v = VaultId::from_bytes([0x11; 16]);
+        let auth = AuthSecret::from_bytes(&[5; 64]).unwrap();
+        assert_eq!(
+            hex(auth.wrapping_key(v).as_bytes()),
+            "cfb949342e8a324586900f55d2d04e9e529b7ed6980fe5d7cbaec8c487df4f33"
+        );
+        assert_eq!(
+            hex(recovery_wrapping_key(&[5; 64], v).as_bytes()),
+            "684c7991603416044288eb58ea463400651cba9c5c7bcc477d69248511672223"
+        );
+        let random: [u8; 16] = std::array::from_fn(|i| i as u8);
+        assert_eq!(
+            hex(recovery_wrapping_key(&random, v).as_bytes()),
+            "ab5ac5a198820184eacee3bffcc03584461e6da31a4f34edd7a909ef03b3eb0a"
+        );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
 }
