@@ -18,5 +18,9 @@ tauri-build.workspace = true
 notebook-core.workspace = true
 tauri.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+tauri = { workspace = true, features = ["test"] }
+
 [lints]
 workspace = true
