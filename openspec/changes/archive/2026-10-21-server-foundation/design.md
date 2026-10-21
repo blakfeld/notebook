@@ -95,13 +95,13 @@ Static files go through the same stack. A first page load is a handful of reques
 
 ### Client IP
 
-`ConnectInfo<SocketAddr>` (from `into_make_service_with_connect_info`) gives the peer. If the peer is in `trusted_proxies`, walk `X-Forwarded-For` right to left and take the first entry that parses as an IP and is not a trusted proxy; if none qualifies, fall back to the peer. Taking the right-most entry matters because the left-most entries are whatever the client claimed. Tests inject the peer with axum's `MockConnectInfo`.
+`ConnectInfo<SocketAddr>` (from `into_make_service_with_connect_info`) gives the peer. If the peer is in `trusted_proxies`, walk `X-Forwarded-For` right to left (splitting raw bytes, so a non-ASCII entry doesn't hide the others), skip trusted proxies and blank entries, and take the first remaining entry. If it doesn't parse as an IP (a proxy may write `unknown` or `unix:`), fall back to the peer; never read further left. Taking the right-most entry matters because the left-most entries are whatever the client claimed. Addresses are compared in canonical form, so IPv4-mapped IPv6 matches IPv4. Tests inject the peer with axum's `MockConnectInfo`.
 
 ### Rate limiting
 
-`governor`'s keyed `RateLimiter<IpKey, DashMapStateStore, ...>` wrapped in a small `KeyedLimiter` type with a `check(ip) -> Result<(), Duration>` method. `IpKey` is the IPv4 address, or the IPv6 address masked to /64. A middleware function reads `ClientIp`, calls `check`, and returns `429` with `Retry-After` (whole seconds, rounded up). A background task calls `retain_recent()` once a minute so the key map doesn't grow without bound.
+`governor`'s keyed `RateLimiter<IpKey, DashMapStateStore, ...>` wrapped in a small `KeyedLimiter` type with a `check(ip) -> Result<(), Duration>` method. `IpKey` is the IPv4 address, or the IPv6 address masked to /64. IPv6 requests must also pass buckets keyed on the enclosing /56 (16× quota) and /48 (64× quota): a /48 is cheap to obtain and holds 65,536 /64s, so per-/64 keying alone would multiply an attacker's limit by that much, and later login limiters inherit the same keying. A middleware function reads `ClientIp`, calls `check`, and returns `429` with `Retry-After` (whole seconds, rounded up). A background task calls `retain_recent()` once a minute so the key map doesn't grow without bound.
 
-Later endpoints (login, recovery, invite redemption) build their own `KeyedLimiter` with stricter quotas and attach it with `route_layer`, reusing the same middleware. This is why the limiter is ours rather than `tower_governor`'s: `tower_governor`'s IP extractors trust forwarding headers from any peer, and we need the trusted-proxy rule and the /64 masking shared by every limiter.
+Later endpoints (login, recovery, invite redemption) build their own `KeyedLimiter` with stricter quotas and attach it with `route_layer`, reusing the same middleware. This is why the limiter is ours rather than `tower_governor`'s: `tower_governor`'s IP extractors trust forwarding headers from any peer, and we need the trusted-proxy rule and the IPv6 prefix keying shared by every limiter.
 
 ### Timeouts and limits
 

@@ -114,7 +114,7 @@ The server SHALL abandon any request whose handling exceeds the configured timeo
 - **THEN** the client receives `408`
 
 ### Requirement: Per-client rate limiting
-The server SHALL limit the request rate from each client address with a token bucket whose sustained rate and burst size are configurable. A request over the limit SHALL get `429` with a `Retry-After` header and SHALL NOT reach the handler. IPv6 clients SHALL be limited per /64 prefix.
+The server SHALL limit the request rate from each client address with a token bucket whose sustained rate and burst size are configurable. A request over the limit SHALL get `429` with a `Retry-After` header and SHALL NOT reach the handler. IPv6 clients SHALL be limited per /64 prefix, and each enclosing /56 and /48 prefix SHALL also be limited, with 16 and 64 times the per-client quota respectively, so rotating addresses within one allocation does not multiply the limit.
 
 #### Scenario: Burst exhausted
 - **WHEN** one client sends more requests than the burst size faster than the sustained rate refills
@@ -128,12 +128,20 @@ The server SHALL limit the request rate from each client address with a token bu
 - **WHEN** requests arrive from two IPv6 addresses in the same /64 prefix
 - **THEN** they draw from the same limit
 
+#### Scenario: Rotating IPv6 prefixes
+- **WHEN** one client sends requests from many different /64 prefixes within the same /48
+- **THEN** once the /56 or /48 limit is exhausted, the excess requests get `429`
+
 ### Requirement: Client address behind a trusted proxy
-The server SHALL use the TCP peer address as the client address, except that when the peer is a configured trusted proxy it SHALL use the right-most address in `X-Forwarded-For` that is not itself a trusted proxy. Forwarding headers from untrusted peers SHALL be ignored.
+The server SHALL use the TCP peer address as the client address, except that when the peer is a configured trusted proxy it SHALL use the right-most address in `X-Forwarded-For` that is not itself a trusted proxy. If the right-most entry that is not a trusted proxy is not a valid address, the server SHALL use the peer address rather than any entry further left. Forwarding headers from untrusted peers SHALL be ignored.
 
 #### Scenario: Request through the proxy
 - **WHEN** a request arrives from a trusted proxy with `X-Forwarded-For: 203.0.113.7`
 - **THEN** the server treats `203.0.113.7` as the client address
+
+#### Scenario: Proxy writes a non-address entry
+- **WHEN** a request arrives from a trusted proxy with `X-Forwarded-For: 6.6.6.6, unknown`
+- **THEN** the server uses the peer address, not `6.6.6.6`
 
 #### Scenario: Spoofed header from the internet
 - **WHEN** a request arrives directly from an untrusted peer with an `X-Forwarded-For` header
