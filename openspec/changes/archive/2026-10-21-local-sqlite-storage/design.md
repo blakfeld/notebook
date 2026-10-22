@@ -43,7 +43,7 @@ crates/notebook-storage-sqlite/
 
 ### `rusqlite`, not `sqlx`
 
-`rusqlite` with `bundled`, at the release whose `libsqlite3-sys` is 0.37 (rusqlite 0.39 at time of writing; task 1.1 confirms the version against the lockfile). It is synchronous, has no runtime dependency, and cross-compiles cleanly to iOS and Android with the bundled amalgamation. The trait is synchronous (next decision), so an async driver would only add a runtime and a worker thread.
+`rusqlite` with `bundled` (and `fallible_uint`, so `u64` sequence numbers and positions bind directly), at the release whose `libsqlite3-sys` is 0.37 (rusqlite 0.39 at time of writing; task 1.1 confirms the version against the lockfile). It is synchronous, has no runtime dependency, and cross-compiles cleanly to iOS and Android with the bundled amalgamation. The trait is synchronous (next decision), so an async driver would only add a runtime and a worker thread.
 
 **Alternative considered:** reuse the workspace `sqlx`. That avoids the shared-`links` coupling. But sqlx is async-only and tokio-bound, which would force an async trait into a core that also compiles for wasm. Its compile-time-checked queries also need a database at build time or an offline cache, which is overkill for six tables.
 
@@ -114,7 +114,7 @@ Echo handling (step 3) means a device's own pushes coming back over pull or WebS
 ### SQLite schema (version 1)
 
 ```sql
-CREATE TABLE meta     (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT;
+CREATE TABLE meta     (key TEXT PRIMARY KEY, value ANY NOT NULL) STRICT;
   -- 'vault_id' (16 bytes, absent when unbound), 'cursor' (u64 as INTEGER)
 CREATE TABLE notes    (note_id BLOB PRIMARY KEY, wrapped_key BLOB NOT NULL,
                        key_pending INTEGER NOT NULL, base BLOB) STRICT;

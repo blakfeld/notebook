@@ -5,6 +5,10 @@ use notebook_core::crypto::{
     VaultId, VaultKey, derive_auth_secret,
 };
 use notebook_core::note::{Note, NoteId, Timestamp};
+use notebook_core::storage::{
+    EntryKind, LocalUpdate, LogEntry, LogPos, MemoryStorage, OutboxEntry, RemoteBatch, RemoteEntry,
+    ServerSeq, Storage, StorageError, StoredNote, UpdateId,
+};
 use notebook_core::tags::{TagPath, TagTree, View, rename, tags_of};
 
 fn id(n: u128) -> NoteId {
@@ -174,4 +178,86 @@ fn identifiers_round_trip_through_text() {
     let vault = VaultId::from_parts(1_700_000_000_000, 99);
     assert_eq!(vault.to_string().parse::<VaultId>(), Ok(vault));
     assert_eq!(note.to_string(), vault.to_string());
+}
+
+#[test]
+fn storing_a_vault_locally() {
+    let vault = VaultId::from_parts(1_000, 1);
+    let vault_key = VaultKey::generate().unwrap();
+    let note_key = NoteKey::generate().unwrap();
+    let note = id(1);
+    let wrapped = vault_key.wrap_note_key(vault, note, &note_key).unwrap();
+    let update = note_key
+        .encrypt(vault, note, PayloadKind::CrdtUpdate, b"first edit")
+        .unwrap();
+
+    let mut store = MemoryStorage::new(vault);
+    assert_eq!(store.vault_id(), vault);
+    store
+        .create_note(
+            note,
+            &wrapped,
+            LocalUpdate {
+                id: UpdateId([1; 16]),
+                bytes: update.clone(),
+            },
+        )
+        .unwrap();
+    let pending: Vec<OutboxEntry> = store.outbox().unwrap();
+    assert_eq!(pending[0].bytes, update);
+    store.acknowledge(UpdateId([1; 16]), ServerSeq(1)).unwrap();
+
+    // Another device's snapshot arrives.
+    let snapshot = note_key
+        .encrypt(vault, note, PayloadKind::CrdtSnapshot, b"full state")
+        .unwrap();
+    store
+        .apply_remote(RemoteBatch {
+            keys: vec![],
+            entries: vec![RemoteEntry {
+                note,
+                kind: EntryKind::Snapshot,
+                id: None,
+                seq: ServerSeq(2),
+                bytes: snapshot,
+            }],
+            cursor: ServerSeq(2),
+        })
+        .unwrap();
+
+    // Load and decrypt everything, as a client does at startup.
+    let stored: StoredNote = store.load_note(note).unwrap().unwrap();
+    let note_key = vault_key
+        .unwrap_note_key(vault, note, &stored.wrapped_key)
+        .unwrap();
+    let plain: Vec<Vec<u8>> = stored
+        .entries
+        .iter()
+        .map(|e: &LogEntry| {
+            let kind = match e.kind {
+                EntryKind::Update => PayloadKind::CrdtUpdate,
+                EntryKind::Snapshot => PayloadKind::CrdtSnapshot,
+            };
+            note_key
+                .decrypt(vault, note, kind, &e.bytes)
+                .unwrap()
+                .to_vec()
+        })
+        .collect();
+    assert_eq!(plain, [b"first edit".to_vec(), b"full state".to_vec()]);
+
+    let last: LogPos = stored.entries[1].pos;
+    store.compact(note, b"compacted", last).unwrap();
+    assert!(store.load_note(note).unwrap().unwrap().entries.is_empty());
+    assert_eq!(
+        store.append_local(
+            id(2),
+            LocalUpdate {
+                id: UpdateId([2; 16]),
+                bytes: vec![]
+            }
+        ),
+        Err(StorageError::NoteNotFound(id(2)))
+    );
+    store.clear().unwrap();
 }

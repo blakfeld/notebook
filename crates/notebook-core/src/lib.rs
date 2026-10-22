@@ -7,6 +7,7 @@
 pub mod crypto;
 pub mod document;
 pub mod note;
+pub mod storage;
 pub mod tags;
 
 /// Returns the version of `notebook-core`.
