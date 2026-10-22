@@ -133,6 +133,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_tables_exist_and_op_ids_are_unique_per_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = connect(&dir.path().join("db")).await.unwrap();
+        migrate(&pool).await.unwrap();
+        let columns = |table: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, String>("SELECT name FROM pragma_table_info(?)")
+                    .bind(table)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(columns("vaults").await.contains(&"sync_head".to_owned()));
+        assert_eq!(
+            columns("sync_notes").await,
+            [
+                "vault_id",
+                "note_id",
+                "wrapped_key",
+                "created_seq",
+                "purged_seq"
+            ]
+        );
+        assert_eq!(
+            columns("ops").await,
+            ["vault_id", "seq", "op_id", "note_id", "payload"]
+        );
+        assert_eq!(
+            columns("snapshots").await,
+            ["vault_id", "note_id", "covers", "payload"]
+        );
+        let unique: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT i.\"unique\", group_concat(c.name, ',') FROM pragma_index_list('ops') i, \
+             pragma_index_info(i.name) c WHERE i.name = 'ops_op_id' GROUP BY i.name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unique, [(1, "vault_id,op_id".to_owned())]);
+
+        for (user, vault) in [(1u8, 11u8), (2, 12)] {
+            sqlx::query(
+                "INSERT INTO users (user_id, username, opaque_record, recovery_verifier_hash, \
+                 created_at, updated_at) VALUES (?, ?, x'00', x'00', 0, 0)",
+            )
+            .bind(vec![user; 16])
+            .bind(format!("u{user}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO vaults (vault_id, user_id, created_at) VALUES (?, ?, 0)")
+                .bind(vec![vault; 16])
+                .bind(vec![user; 16])
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let insert = |vault: u8, seq: i64| {
+            sqlx::query(
+                "INSERT INTO ops (vault_id, seq, op_id, note_id, payload) \
+                 VALUES (?, ?, x'01', x'02', x'03')",
+            )
+            .bind(vec![vault; 16])
+            .bind(seq)
+            .execute(&pool)
+        };
+        insert(11, 1).await.unwrap();
+        insert(12, 1).await.unwrap();
+        let err = insert(11, 2).await.unwrap_err();
+        assert!(err.to_string().contains("UNIQUE"), "{err}");
+    }
+
+    #[tokio::test]
     async fn refuses_newer_schema() {
         let dir = tempfile::tempdir().unwrap();
         let pool = connect(&dir.path().join("db")).await.unwrap();

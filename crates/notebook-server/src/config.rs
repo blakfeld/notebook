@@ -27,6 +27,8 @@ pub struct Config {
     pub request_timeout_secs: NonZeroU64,
     pub rate_limit_per_second: NonZeroU32,
     pub rate_limit_burst: NonZeroU32,
+    /// The largest accepted encrypted update, in bytes.
+    pub sync_max_update_bytes: NonZeroUsize,
     pub log_format: LogFormat,
     /// A `tracing` filter directive, such as `info` or `notebook_server=debug`.
     pub log_level: String,
@@ -141,6 +143,9 @@ impl Config {
             rate_limit_burst: env_value(&env, "rate_limit_burst")?
                 .or(file.rate_limit_burst)
                 .unwrap_or(NonZeroU32::new(100).unwrap()),
+            sync_max_update_bytes: env_value(&env, "sync_max_update_bytes")?
+                .or(file.sync_max_update_bytes)
+                .unwrap_or(NonZeroUsize::new(256 * 1024).unwrap()),
             log_format: env_value(&env, "log_format")?
                 .or(file.log_format)
                 .unwrap_or(LogFormat::Text),
@@ -214,6 +219,7 @@ struct FileConfig {
     request_timeout_secs: Option<NonZeroU64>,
     rate_limit_per_second: Option<NonZeroU32>,
     rate_limit_burst: Option<NonZeroU32>,
+    sync_max_update_bytes: Option<NonZeroUsize>,
     log_format: Option<LogFormat>,
     log_level: Option<String>,
 }
@@ -295,6 +301,7 @@ mod tests {
         assert_eq!(config.request_timeout_secs.get(), 30);
         assert_eq!(config.rate_limit_per_second.get(), 20);
         assert_eq!(config.rate_limit_burst.get(), 100);
+        assert_eq!(config.sync_max_update_bytes.get(), 262_144);
         assert_eq!(config.log_format, LogFormat::Text);
         assert_eq!(config.log_level, "info");
     }
@@ -391,6 +398,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.trusted_proxies, vec![IpAddr::from([127, 0, 0, 1])]);
+    }
+
+    #[test]
+    fn sync_max_update_bytes_from_file_and_env() {
+        let file = "public_url = \"http://localhost\"\nsync_max_update_bytes = 1000\n";
+        let config = load(Some(file), &[]).unwrap();
+        assert_eq!(config.sync_max_update_bytes.get(), 1000);
+        let config = load(Some(file), &[("NOTEBOOK_SYNC_MAX_UPDATE_BYTES", "2000")]).unwrap();
+        assert_eq!(config.sync_max_update_bytes.get(), 2000);
+        let err = load(None, &[URL, ("NOTEBOOK_SYNC_MAX_UPDATE_BYTES", "0")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NOTEBOOK_SYNC_MAX_UPDATE_BYTES"), "{err}");
     }
 
     #[test]

@@ -55,6 +55,9 @@ max_body_bytes = 1048576
 request_timeout_secs = 30
 rate_limit_per_second = 20
 rate_limit_burst = 100
+# Largest accepted encrypted note update. Snapshots are bounded by
+# max_body_bytes instead.
+sync_max_update_bytes = 262144
 
 log_format = "json"
 log_level = "info"
@@ -72,6 +75,7 @@ log_level = "info"
 | `request_timeout_secs` | `30` | `NOTEBOOK_REQUEST_TIMEOUT_SECS` |
 | `rate_limit_per_second` | `20` | `NOTEBOOK_RATE_LIMIT_PER_SECOND` |
 | `rate_limit_burst` | `100` | `NOTEBOOK_RATE_LIMIT_BURST` |
+| `sync_max_update_bytes` | `262144` | `NOTEBOOK_SYNC_MAX_UPDATE_BYTES` |
 | `log_format` | `text` | `NOTEBOOK_LOG_FORMAT` (`text` or `json`) |
 | `log_level` | `info` | `NOTEBOOK_LOG_LEVEL` (a `tracing` filter) |
 
@@ -223,6 +227,36 @@ stop slow or idle clients from holding connections open. The server's
 `request_timeout_secs` covers handler time only. No write timeout is set, since
 it would cut off long-lived sync connections.
 
+## Sync
+
+Clients sync through `/sync/v1`: HTTP endpoints for push, pull, snapshot
+upload, and purge, and a WebSocket at `/sync/v1/live` for live updates.
+
+- **Limits.** Each pushed update may be at most `sync_max_update_bytes`
+  (256 KiB by default); a snapshot, a whole push request, and each WebSocket
+  message may be at most `max_body_bytes`. A note whose encrypted state
+  outgrows `max_body_bytes` can't be snapshotted and its log keeps growing;
+  raise `max_body_bytes` if that happens.
+- **WebSockets through the proxy.** Caddy's `reverse_proxy` passes WebSocket
+  upgrades with no extra configuration. Browsers send an `Origin` header,
+  which must equal the origin of `public_url` (scheme, host, and port), or the
+  upgrade is refused with `403`; set `public_url` to exactly the address users
+  type. Native clients send no `Origin`. Each vault may hold 16 live
+  connections, and sockets are pinged every 30 seconds.
+- **One process.** Live delivery is ordered by an in-process lock per vault,
+  so exactly one `notebook-server` process may serve a database. Don't run
+  replicas against the same file.
+- **What the server sees.** Note contents, titles, tags, and note keys are
+  encrypted on the client. The server does see note IDs, the number, sizes,
+  and timing of each note's updates and snapshots, and when notes are
+  purged.
+- **After a restore,** sequence numbers restart from the backup's, so clients
+  that synced past it are out of step. Clients whose cursor is ahead of the
+  restored server are told to bootstrap again, but a client that synced to a
+  point the restored server has since reused can miss changes without
+  noticing. After restoring, have every user sign out and back in on each
+  device (or clear its local data) so it bootstraps from the server.
+
 ## Backups with Litestream
 
 The server runs SQLite in WAL mode, which Litestream requires. Run Litestream
@@ -269,7 +303,8 @@ sudo --preserve-env=LITESTREAM_ACCESS_KEY_ID,LITESTREAM_SECRET_ACCESS_KEY -u not
 systemctl start notebook litestream
 ```
 
-Add `-timestamp <RFC 3339 time>` to restore to a point in time.
+Add `-timestamp <RFC 3339 time>` to restore to a point in time. Then have
+users re-bootstrap their devices; see "Sync".
 
 ## Upgrades and rollback
 
