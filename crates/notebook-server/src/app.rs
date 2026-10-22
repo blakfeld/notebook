@@ -17,7 +17,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
-use crate::auth::{self, AuthState, RegistrationPolicy, Setup};
+use crate::auth::{self, AuthState, Setup};
 use crate::config::Config;
 use crate::rate_limit::KeyedLimiter;
 use crate::sync::{LiveSettings, SyncState};
@@ -45,17 +45,18 @@ pub struct AppState {
 
 impl AppState {
     /// `setup` is the OPAQUE server key, normally from
-    /// [`auth::keyfile::load_or_create`]. HTTP registration is closed.
+    /// [`auth::keyfile::load_or_create`]. HTTP registration needs an invite.
     pub fn new(pool: SqlitePool, config: Config, setup: Setup) -> Self {
         let limiter = Arc::new(KeyedLimiter::new(
             config.rate_limit_per_second,
             config.rate_limit_burst,
         ));
+        let auth = Arc::new(AuthState::new(setup, &config));
         AppState {
             pool,
             config: Arc::new(config),
             limiter,
-            auth: Arc::new(AuthState::new(setup, RegistrationPolicy::Closed)),
+            auth,
             sync: Arc::new(SyncState::new(LiveSettings::default())),
         }
     }

@@ -328,6 +328,7 @@ async fn two_clients_sync_and_a_third_bootstraps() {
             key_bundle: b"b",
             now: unix_now(),
         },
+        100 * 1024 * 1024,
     )
     .await
     .unwrap();

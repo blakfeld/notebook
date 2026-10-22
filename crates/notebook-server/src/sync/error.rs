@@ -20,6 +20,7 @@ impl SyncError {
     pub const UPDATE_TOO_LARGE: Self = Self(ErrorCode::UpdateTooLarge);
     pub const MISSING_NOTE_KEY: Self = Self(ErrorCode::MissingNoteKey);
     pub const RATE_LIMITED: Self = Self(ErrorCode::RateLimited);
+    pub const QUOTA_EXCEEDED: Self = Self(ErrorCode::QuotaExceeded);
     pub const INTERNAL: Self = Self(ErrorCode::Internal);
 
     pub fn status(self) -> StatusCode {
@@ -35,6 +36,7 @@ impl SyncError {
             ErrorCode::UpdateTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ErrorCode::MissingNoteKey => StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::QuotaExceeded => StatusCode::INSUFFICIENT_STORAGE,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

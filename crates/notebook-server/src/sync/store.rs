@@ -3,8 +3,9 @@
 //! Each write is one `BEGIN IMMEDIATE` transaction that reads `sync_head`,
 //! validates, writes, advances the head, and commits, so sequence assignment
 //! and compaction never disagree. Each computes its net payload-byte delta
-//! and has one marked point, just before commit, where `invite-codes` adds
-//! its per-vault quota check. HTTP and live-channel pushes share [`push`].
+//! and passes it to [`quota::reserve`] just before commit, which keeps the
+//! vault's usage exact and rejects growth past its quota. HTTP and
+//! live-channel pushes share [`push`].
 //!
 //! Payloads are stored and returned exactly as received and never logged.
 
@@ -18,6 +19,7 @@ use notebook_core::protocol::{
 use sqlx::{SqliteConnection, SqlitePool};
 
 use super::error::SyncError;
+use crate::quota;
 
 /// The payload budget of one pull page.
 pub const PAGE_BUDGET: usize = 2 * 1024 * 1024;
@@ -101,6 +103,16 @@ async fn write_head(conn: &mut SqliteConnection, vault: &[u8], head: u64) -> Res
         .execute(conn)
         .await?;
     Ok(())
+}
+
+/// Applies a write's net payload-byte `delta` to the vault's usage, or fails
+/// with `quota_exceeded`, which rolls the write back.
+async fn reserve(conn: &mut SqliteConnection, vault: &[u8], delta: i64) -> Result<(), SyncError> {
+    if quota::reserve(conn, vault, delta).await? {
+        Ok(())
+    } else {
+        Err(SyncError::QUOTA_EXCEEDED)
+    }
 }
 
 /// The vault's head sequence number.
@@ -241,7 +253,7 @@ pub async fn push(
     if head != start {
         write_head(&mut tx, vault, head).await?;
     }
-    // Quota hook: `delta` is this write's net payload bytes.
+    reserve(&mut tx, vault, delta).await?;
     tx.commit().await?;
     Ok(Pushed {
         seqs,
@@ -312,8 +324,8 @@ pub async fn snapshot(
         .execute(&mut *tx)
         .await?;
     let delta = len(data) - replaced.map_or(0, |(_, bytes)| bytes) - compacted;
-    // Quota hook: `delta` is this write's net payload bytes (usually
-    // negative, which is always allowed).
+    // Usually negative, which is always allowed.
+    reserve(&mut tx, vault, delta).await?;
     tx.commit().await?;
     Ok(delta)
 }
@@ -366,7 +378,7 @@ pub async fn purge(pool: &SqlitePool, vault: &[u8], note: NoteId) -> Result<Purg
     .await?;
     write_head(&mut tx, vault, seq).await?;
     let delta = -freed;
-    // Quota hook: `delta` is this write's net payload bytes (never positive).
+    reserve(&mut tx, vault, delta).await?;
     tx.commit().await?;
     Ok(Purged {
         entry: Some(Entry::Purge { seq, note }),

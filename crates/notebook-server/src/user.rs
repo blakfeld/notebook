@@ -16,7 +16,7 @@ use crate::auth::store::new_user_id;
 use crate::auth::store::{self, CreateError};
 use crate::auth::{Setup, keyfile, unix_now};
 use crate::config::Config;
-use crate::db;
+use crate::{db, quota};
 
 #[derive(Debug)]
 pub enum UserError {
@@ -85,7 +85,15 @@ pub async fn add(
         db::migrate(&pool).await?;
         let setup = keyfile::load_or_create(&pool, &config.opaque_key_path).await?;
         Ok::<_, Box<dyn std::error::Error>>(
-            create(&pool, &setup, name.as_str(), &passphrase, is_admin).await?,
+            create(
+                &pool,
+                &setup,
+                name.as_str(),
+                &passphrase,
+                is_admin,
+                config.default_quota(),
+            )
+            .await?,
         )
     }
     .await;
@@ -105,14 +113,17 @@ pub async fn add(
     Ok(())
 }
 
-/// Creates the account and returns its recovery key for display. Nothing is
-/// created on error.
+/// Creates the account, with a vault quota of `quota_bytes`, and returns its
+/// recovery key for display. Nothing is created on error. Needs no invite:
+/// the account goes straight to [`store::create_account`], never through the
+/// HTTP handlers.
 pub async fn create(
     pool: &SqlitePool,
     setup: &Setup,
     username: &str,
     passphrase: &str,
     is_admin: bool,
+    quota_bytes: i64,
 ) -> Result<Zeroizing<String>, UserError> {
     let name = Username::parse(username).map_err(|_| UserError::InvalidUsername)?;
     let mut conn = pool.acquire().await?;
@@ -125,7 +136,7 @@ pub async fn create(
     drop(conn);
 
     let (registration, start) =
-        Registration::start(name.as_str(), passphrase).map_err(|e| match e {
+        Registration::start(name.as_str(), passphrase, "").map_err(|e| match e {
             AuthError::PassphraseTooShort => UserError::PassphraseTooShort,
             AuthError::InvalidUsername => UserError::InvalidUsername,
             e => UserError::Other(e.to_string()),
@@ -163,6 +174,7 @@ pub async fn create(
             key_bundle: &finish.key_bundle,
             now,
         },
+        quota_bytes,
     )
     .await;
     match created {
@@ -173,6 +185,37 @@ pub async fn create(
     }
     tx.commit().await?;
     Ok(account.recovery_key.to_display())
+}
+
+/// The `user quota` command: prints the vault's usage and quota, after
+/// setting the quota to `size` bytes if given. Unknown users are an error.
+pub async fn quota(
+    config: Config,
+    username: &str,
+    size: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let name = Username::parse(username).map_err(|_| UserError::InvalidUsername)?;
+    let pool = db::open(&config.database_path).await?;
+    let result = async {
+        let mut conn = pool.acquire().await?;
+        match size {
+            Some(size) => {
+                let size = i64::try_from(size).unwrap_or(i64::MAX);
+                quota::set(&mut conn, name.as_str(), size).await
+            }
+            None => quota::usage(&mut conn, name.as_str()).await,
+        }
+    }
+    .await;
+    pool.close().await;
+    let Some(usage) = result? else {
+        return Err(UserError::Other(format!("no user named {name}")).into());
+    };
+    println!(
+        "{name}: {} of {} bytes used",
+        usage.used_bytes, usage.quota_bytes
+    );
+    Ok(())
 }
 
 /// The passphrase, if both prompts agree.

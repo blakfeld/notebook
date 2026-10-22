@@ -4,7 +4,6 @@
 //! The client side of every flow is in `notebook_core::auth`; this module
 //! runs `opaque-ke`'s server side with the same [`Suite`].
 
-pub mod admission;
 mod error;
 mod handlers;
 pub mod keyfile;
@@ -27,9 +26,9 @@ use opaque_ke::ServerLogin;
 use sqlx::SqlitePool;
 
 use crate::app::AppState;
+use crate::config::Config;
 use crate::rate_limit::{self, KeyedLimiter, NameLimiter};
 
-pub use admission::RegistrationPolicy;
 pub use error::{ApiError, ApiJson};
 pub use keyfile::Setup;
 pub use sessions::{AuthSession, authenticate_token, is_active};
@@ -41,11 +40,11 @@ pub const MAX_DEVICE_NAME_CHARS: usize = 64;
 pub struct AuthState {
     pub setup: Setup,
     pub pending: Arc<pending::PendingMap<Pending>>,
-    pub policy: RegistrationPolicy,
     /// Per normalized username, for login and passphrase change.
     pub username_limiter: Arc<NameLimiter>,
     pub login_limiter: Arc<KeyedLimiter>,
     pub recover_limiter: Arc<KeyedLimiter>,
+    /// Shared by registration start and finish, which both check an invite.
     pub register_limiter: Arc<KeyedLimiter>,
     clock: Clock,
 }
@@ -73,11 +72,11 @@ fn nonzero(n: u32) -> NonZeroU32 {
 }
 
 impl AuthState {
-    pub fn new(setup: Setup, policy: RegistrationPolicy) -> Self {
+    /// `config` sets the registration limit.
+    pub fn new(setup: Setup, config: &Config) -> Self {
         Self {
             setup,
             pending: Arc::new(pending::PendingMap::new()),
-            policy,
             username_limiter: Arc::new(NameLimiter::per_period(
                 Duration::from_secs(60),
                 nonzero(10),
@@ -90,9 +89,9 @@ impl AuthState {
                 Duration::from_secs(600),
                 nonzero(5),
             )),
-            register_limiter: Arc::new(KeyedLimiter::per_period(
-                Duration::from_secs(60),
-                nonzero(5),
+            register_limiter: Arc::new(KeyedLimiter::per_minute(
+                config.registration_rate_limit_per_minute,
+                config.registration_rate_limit_burst,
             )),
             clock: Clock::default(),
         }
@@ -117,7 +116,10 @@ impl AuthState {
     }
 }
 
-/// The `/auth` routes, with the per-address limits on the start steps.
+/// The `/auth` routes, with the per-address limits on the start steps and
+/// on registration finish. Registration has no pending handshake, so one
+/// start's response could be replayed into many finishes, each carrying an
+/// invite code to check; both steps draw from the same bucket.
 pub fn routes(state: &AppState) -> Router<AppState> {
     let limit =
         |limiter: &Arc<KeyedLimiter>| from_fn_with_state(limiter.clone(), rate_limit::middleware);
@@ -127,7 +129,10 @@ pub fn routes(state: &AppState) -> Router<AppState> {
             "/auth/register/start",
             post(handlers::register_start).route_layer(limit(&auth.register_limiter)),
         )
-        .route("/auth/register/finish", post(handlers::register_finish))
+        .route(
+            "/auth/register/finish",
+            post(handlers::register_finish).route_layer(limit(&auth.register_limiter)),
+        )
         .route(
             "/auth/login/start",
             post(handlers::login_start).route_layer(limit(&auth.login_limiter)),

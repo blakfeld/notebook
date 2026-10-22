@@ -96,6 +96,7 @@ impl Server {
                 key_bundle: b"b",
                 now: unix_now(),
             },
+            100 * 1024 * 1024,
         )
         .await
         .unwrap();
@@ -520,6 +521,58 @@ async fn rejected_socket_push_keeps_the_socket_open() {
         &ClientFrame::Push {
             request_id: "ok".into(),
             updates: vec![upd(3, 1, b"ok")],
+        },
+    )
+    .await;
+    assert_eq!(expect_entry(&mut other).await.seq(), 1);
+}
+
+#[tokio::test]
+async fn over_quota_socket_push_is_rejected_and_not_relayed() {
+    let s = server(LiveSettings::default()).await;
+    s.account(1).await;
+    sqlx::query("UPDATE vaults SET quota_bytes = 10")
+        .execute(&s.state.pool)
+        .await
+        .unwrap();
+    let token = s.token(1).await;
+    let (mut ws, _) = s.live(&token).await;
+    let (mut other, _) = s.live(&token).await;
+    send(
+        &mut ws,
+        &ClientFrame::Push {
+            request_id: "full".into(),
+            updates: vec![upd(1, 1, &[0; 11])],
+        },
+    )
+    .await;
+    match next(&mut ws).await {
+        Event::Frame(ServerFrame::PushResult {
+            request_id,
+            outcome,
+        }) => {
+            assert_eq!(request_id, "full");
+            assert_eq!(
+                outcome,
+                PushOutcome::Rejected(ErrorBody {
+                    error: ErrorCode::QuotaExceeded
+                })
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.op_count().await, 0);
+    assert!(matches!(
+        next_within(&mut other, Duration::from_millis(300)).await,
+        Event::Timeout
+    ));
+
+    // Still open: a push that fits goes through.
+    send(
+        &mut ws,
+        &ClientFrame::Push {
+            request_id: "fits".into(),
+            updates: vec![upd(2, 1, &[0; 10])],
         },
     )
     .await;

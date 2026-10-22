@@ -207,6 +207,7 @@ async fn native_engines_converge_retry_and_purge() {
             key_bundle: b"b",
             now: unix_now(),
         },
+        100 * 1024 * 1024,
     )
     .await
     .unwrap();

@@ -29,13 +29,14 @@ use tempfile::TempDir;
 use tower::ServiceExt;
 
 use super::sessions::{ACCESS_TTL_SECS, AuthSession};
-use super::{AuthState, RegistrationPolicy, keyfile};
+use super::{AuthState, keyfile};
 use crate::app::{self, AppState};
 use crate::config::Config;
-use crate::{db, user};
+use crate::{db, invites, user};
 
 const T0: i64 = 1_800_000_000;
 const MARKER: &str = "walrus-MARKER-8812";
+const QUOTA: i64 = 100 * 1024 * 1024;
 
 fn pass(tag: &str) -> String {
     format!("{MARKER} {tag}")
@@ -49,9 +50,19 @@ struct Harness {
     next_peer: AtomicU32,
 }
 
-async fn harness(policy: RegistrationPolicy) -> Harness {
+async fn harness() -> Harness {
+    harness_with(&[]).await
+}
+
+/// A harness whose config also has these `NOTEBOOK_` variables.
+async fn harness_with(vars: &[(&str, &str)]) -> Harness {
     let config = Config::from_sources(None, |k| {
-        (k == "NOTEBOOK_PUBLIC_URL").then(|| "http://localhost".to_owned())
+        if k == "NOTEBOOK_PUBLIC_URL" {
+            return Some("http://localhost".to_owned());
+        }
+        vars.iter()
+            .find(|(name, _)| *name == k)
+            .map(|(_, v)| (*v).to_owned())
     })
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -60,7 +71,7 @@ async fn harness(policy: RegistrationPolicy) -> Harness {
     let setup = keyfile::load_or_create(&pool, &dir.path().join("key"))
         .await
         .unwrap();
-    let mut auth = AuthState::new(setup, policy);
+    let mut auth = AuthState::new(setup, &config);
     let clock = auth.fix_clock(T0);
     let state = AppState {
         auth: Arc::new(auth),
@@ -179,8 +190,38 @@ impl Harness {
             .await
     }
 
+    /// A new active invite's code, valid for a week from the harness clock.
+    async fn invite(&self) -> String {
+        invites::create(
+            &self.state.pool,
+            self.state.auth.now(),
+            Duration::from_secs(7 * 86_400),
+            None,
+        )
+        .await
+        .unwrap()
+        .1
+    }
+
+    async fn invite_active(&self, code: &str) -> bool {
+        let mut conn = self.state.pool.acquire().await.unwrap();
+        invites::check(&mut conn, code, self.state.auth.now())
+            .await
+            .unwrap()
+    }
+
     async fn register(&self, username: &str, passphrase: &str) -> (Session, NewAccount) {
-        let (reg, start) = Registration::start(username, passphrase).unwrap();
+        let code = self.invite().await;
+        self.register_with(username, passphrase, &code).await
+    }
+
+    async fn register_with(
+        &self,
+        username: &str,
+        passphrase: &str,
+        code: &str,
+    ) -> (Session, NewAccount) {
+        let (reg, start) = Registration::start(username, passphrase, code).unwrap();
         let reply = self.post("/auth/register/start", &start, None).await;
         assert_eq!(reply.status, StatusCode::OK, "{}", reply.error());
         let response: RegisterStartResponse = reply.json();
@@ -330,7 +371,7 @@ fn assert_same_vault_key(account: &NewAccount, vault_key: &VaultKey) {
 
 #[tokio::test]
 async fn protected_route_requires_a_live_access_token() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, _) = h.register("alice", &pass("1")).await;
     assert_eq!(h.whoami(&session.access_token).await, StatusCode::OK);
 
@@ -364,7 +405,7 @@ async fn protected_route_requires_a_live_access_token() {
 
 #[tokio::test]
 async fn registration_then_login_returns_the_same_bundle() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, account) = h.register("Alice", &pass("1")).await;
     assert_eq!(session.username, "alice");
     assert!(!session.is_admin);
@@ -378,8 +419,9 @@ async fn registration_then_login_returns_the_same_bundle() {
 
 #[tokio::test]
 async fn malformed_bundle_creates_nothing() {
-    let h = harness(RegistrationPolicy::Open).await;
-    let (reg, start) = Registration::start("alice", &pass("1")).unwrap();
+    let h = harness().await;
+    let code = h.invite().await;
+    let (reg, start) = Registration::start("alice", &pass("1"), &code).unwrap();
     let response: RegisterStartResponse = h.post("/auth/register/start", &start, None).await.json();
     let (mut finish, _) = reg.finish(&response, Device::default(), 0).unwrap();
     finish.key_bundle = vec![1, 2, 3];
@@ -388,13 +430,14 @@ async fn malformed_bundle_creates_nothing() {
     for table in ["users", "vaults", "key_bundles", "sessions"] {
         assert_eq!(h.count(table).await, 0, "{table}");
     }
+    assert!(h.invite_active(&code).await);
 }
 
 #[tokio::test]
 async fn vault_id_in_use_creates_nothing() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (_, existing) = h.register("alice", &pass("1")).await;
-    let (reg, start) = Registration::start("bob", &pass("2")).unwrap();
+    let (reg, start) = Registration::start("bob", &pass("2"), &h.invite().await).unwrap();
     let response: RegisterStartResponse = h.post("/auth/register/start", &start, None).await.json();
     let (mut finish, account) = reg.finish(&response, Device::default(), 0).unwrap();
     finish.key_bundle = KeyBundle::create(
@@ -414,7 +457,7 @@ async fn vault_id_in_use_creates_nothing() {
 
 #[tokio::test]
 async fn invalid_requests_are_uniform_json() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let reply = h
         .request(
             Method::POST,
@@ -428,7 +471,11 @@ async fn invalid_requests_are_uniform_json() {
     let reply = h
         .post(
             "/auth/register/start",
-            &serde_json::json!({"username": "al ice", "registration_request": "AAAA"}),
+            &serde_json::json!({
+                "username": "al ice",
+                "registration_request": "AAAA",
+                "invite_code": h.invite().await,
+            }),
             None,
         )
         .await;
@@ -445,23 +492,27 @@ async fn invalid_requests_are_uniform_json() {
 
 #[tokio::test]
 async fn duplicate_username_is_taken() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("bob", &pass("1")).await;
-    let (reg, start) = Registration::start("BOB", &pass("2")).unwrap();
+    let code = h.invite().await;
+    let (reg, start) = Registration::start("BOB", &pass("2"), &code).unwrap();
     let response: RegisterStartResponse = h.post("/auth/register/start", &start, None).await.json();
     let (finish, _) = reg.finish(&response, Device::default(), 0).unwrap();
     let reply = h.post("/auth/register/finish", &finish, None).await;
     exact_error(&reply, StatusCode::CONFLICT, "username_taken");
     assert_eq!(h.count("users").await, 1);
     h.login("bob", &pass("1")).await;
+    // The failed finish rolled the invite back with it.
+    assert!(h.invite_active(&code).await);
+    h.register_with("carol", &pass("3"), &code).await;
 }
 
 #[tokio::test]
 async fn concurrent_registrations_leave_one_account() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let mut finishes = Vec::new();
     for tag in ["a", "b"] {
-        let (reg, start) = Registration::start("carol", &pass(tag)).unwrap();
+        let (reg, start) = Registration::start("carol", &pass(tag), &h.invite().await).unwrap();
         let response: RegisterStartResponse =
             h.post("/auth/register/start", &start, None).await.json();
         finishes.push(reg.finish(&response, Device::default(), 0).unwrap().0);
@@ -478,40 +529,147 @@ async fn concurrent_registrations_leave_one_account() {
 }
 
 #[tokio::test]
-async fn closed_registration_reveals_nothing() {
-    let h = harness(RegistrationPolicy::Closed).await;
+async fn invalid_invites_reveal_nothing() {
+    let h = harness().await;
     user::create(
         &h.state.pool,
         &h.state.auth.setup,
         "taken",
         &pass("1"),
         false,
+        QUOTA,
     )
     .await
     .unwrap();
-    let mut bodies = Vec::new();
-    for name in ["taken", "unused"] {
-        let (reg, start) = Registration::start(name, &pass("1")).unwrap();
-        let reply = h.post("/auth/register/start", &start, None).await;
-        exact_error(&reply, StatusCode::FORBIDDEN, "registration_closed");
-        bodies.push(reply.body);
+    let pool = &h.state.pool;
+    let used = h.invite().await;
+    h.register_with("someone", &pass("1"), &used).await;
+    let (_, expired) = invites::create(pool, T0 - 2 * 86_400, Duration::from_secs(86_400), None)
+        .await
+        .unwrap();
+    let (revoked, revoked_code) = invites::create(pool, T0, Duration::from_secs(86_400), None)
+        .await
+        .unwrap();
+    invites::revoke(pool, &revoked.short_id(), T0)
+        .await
+        .unwrap();
+    let unknown = invites::generate();
+    let codes = [
+        None,
+        Some(""),
+        Some("not a code"),
+        Some(unknown.as_str()),
+        Some(expired.as_str()),
+        Some(revoked_code.as_str()),
+        Some(used.as_str()),
+    ];
+    let users = h.count("users").await;
 
-        // A finish built against a throwaway open server is refused the same way.
-        let open = harness(RegistrationPolicy::Open).await;
-        let response: RegisterStartResponse =
-            open.post("/auth/register/start", &start, None).await.json();
-        let (finish, _) = reg.finish(&response, Device::default(), 0).unwrap();
-        let reply = h.post("/auth/register/finish", &finish, None).await;
-        exact_error(&reply, StatusCode::FORBIDDEN, "registration_closed");
-        bodies.push(reply.body);
+    // The code is checked before anything else, so the rest of each request
+    // (a taken, available, or malformed username; garbage OPAQUE messages)
+    // makes no difference.
+    let mut bodies = Vec::new();
+    for name in ["taken", "unused", "al ice"] {
+        for code in codes {
+            let mut start = serde_json::json!({"username": name, "registration_request": "AAAA"});
+            let mut finish = serde_json::json!({
+                "username": name,
+                "registration_upload": "AAAA",
+                "key_bundle": "AAAA",
+                "recovery_verifier": "AAAA",
+            });
+            if let Some(code) = code {
+                start["invite_code"] = code.into();
+                finish["invite_code"] = code.into();
+            }
+            for (path, body) in [
+                ("/auth/register/start", start),
+                ("/auth/register/finish", finish),
+            ] {
+                let reply = h.post(path, &body, None).await;
+                exact_error(&reply, StatusCode::FORBIDDEN, "invalid_invite");
+                bodies.push(reply.body);
+            }
+        }
     }
     assert!(bodies.windows(2).all(|w| w[0] == w[1]));
+    assert_eq!(h.count("users").await, users);
+}
+
+#[tokio::test]
+async fn registration_consumes_its_invite() {
+    let h = harness().await;
+    let code = h.invite().await;
+    // Retyped in lower case without dashes.
+    let (session, _) = h
+        .register_with("alice", &pass("1"), &code.replace('-', "").to_lowercase())
+        .await;
+    let invite = invites::list(&h.state.pool, h.state.auth.now(), true)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(invite.status, invites::Status::Used);
+    assert_eq!(invite.used_by.as_deref(), Some("alice"));
+    assert_eq!(invite.used_at, Some(T0));
+    assert_eq!(h.whoami(&session.access_token).await, StatusCode::OK);
+
+    // A second registration with the same code is refused.
+    let (_, start) = Registration::start("bob", &pass("2"), &code).unwrap();
+    let reply = h.post("/auth/register/start", &start, None).await;
+    exact_error(&reply, StatusCode::FORBIDDEN, "invalid_invite");
     assert_eq!(h.count("users").await, 1);
 }
 
 #[tokio::test]
+async fn registered_vault_gets_the_configured_quota() {
+    let h = harness_with(&[("NOTEBOOK_DEFAULT_VAULT_QUOTA_BYTES", "52428800")]).await;
+    h.register("alice", &pass("1")).await;
+    let mut conn = h.state.pool.acquire().await.unwrap();
+    assert_eq!(
+        crate::quota::usage(&mut conn, "alice").await.unwrap(),
+        Some(crate::quota::Usage {
+            used_bytes: 0,
+            quota_bytes: 52_428_800
+        })
+    );
+}
+
+#[tokio::test]
+async fn concurrent_redemption_creates_one_account() {
+    let h = harness().await;
+    let code = h.invite().await;
+    let mut finishes = Vec::new();
+    for name in ["dora", "erin"] {
+        let (reg, start) = Registration::start(name, &pass(name), &code).unwrap();
+        let response: RegisterStartResponse =
+            h.post("/auth/register/start", &start, None).await.json();
+        finishes.push(reg.finish(&response, Device::default(), 0).unwrap().0);
+    }
+    let (a, b) = tokio::join!(
+        h.post("/auth/register/finish", &finishes[0], None),
+        h.post("/auth/register/finish", &finishes[1], None),
+    );
+    let (ok, refused) = if a.status == StatusCode::OK {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    assert_eq!(ok.status, StatusCode::OK, "{}", ok.error());
+    exact_error(&refused, StatusCode::FORBIDDEN, "invalid_invite");
+    for table in ["users", "vaults", "key_bundles", "sessions"] {
+        assert_eq!(h.count(table).await, 1, "{table}");
+    }
+    let winner = ok.json::<Session>().username;
+    let invite = invites::list(&h.state.pool, T0, true)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(invite.used_by, Some(winner));
+}
+
+#[tokio::test]
 async fn long_device_name_is_rejected() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
     let ok = "é".repeat(64);
     let (login, _) = h
@@ -549,7 +707,7 @@ async fn long_device_name_is_rejected() {
 
 #[tokio::test]
 async fn wrong_passphrase_and_unknown_user_fail_alike() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
     let sessions_before = h.count("sessions").await;
 
@@ -589,7 +747,7 @@ async fn wrong_passphrase_and_unknown_user_fail_alike() {
 
 #[tokio::test]
 async fn unknown_user_response_is_stable() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (_, start) = Login::start("nobody", "whatever passphrase").unwrap();
     let first: LoginStartResponse = h.post("/auth/login/start", &start, None).await.json();
     let second: LoginStartResponse = h.post("/auth/login/start", &start, None).await.json();
@@ -621,7 +779,7 @@ async fn unknown_user_response_is_stable() {
 
 #[tokio::test]
 async fn late_and_replayed_finishes_fail() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
 
     let (login, start) = Login::start("alice", &pass("1")).unwrap();
@@ -650,7 +808,7 @@ async fn late_and_replayed_finishes_fail() {
 
 #[tokio::test]
 async fn refresh_rotates_and_detects_reuse() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, _) = h.register("alice", &pass("1")).await;
     let reply = h.refresh(&session.refresh_token).await;
     assert_eq!(reply.status, StatusCode::OK);
@@ -681,7 +839,7 @@ async fn refresh_rotates_and_detects_reuse() {
 
 #[tokio::test]
 async fn sessions_are_listed_and_revocable_per_user() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
     let laptop = Device {
         name: "Work laptop".into(),
@@ -750,7 +908,7 @@ async fn sessions_are_listed_and_revocable_per_user() {
 
 #[tokio::test]
 async fn logout_ends_both_tokens() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, _) = h.register("alice", &pass("1")).await;
     let reply = h
         .post("/auth/logout", &(), Some(&session.access_token))
@@ -769,7 +927,7 @@ async fn logout_ends_both_tokens() {
 
 #[tokio::test]
 async fn browser_sessions_end_after_twelve_hours() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
     let browser = Device {
         name: String::new(),
@@ -800,7 +958,7 @@ async fn browser_sessions_end_after_twelve_hours() {
 
 #[tokio::test]
 async fn key_bundle_matches_login_and_needs_a_token() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
     let (login, _) = h.login("alice", &pass("1")).await;
     let token = &login.session.access_token;
@@ -815,7 +973,7 @@ async fn key_bundle_matches_login_and_needs_a_token() {
 
 #[tokio::test]
 async fn passphrase_change_signs_out_other_devices() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (_, account) = h.register("alice", &pass("old")).await;
     let (a, _) = h.login("alice", &pass("old")).await;
     let (b, _) = h.login("alice", &pass("old")).await;
@@ -855,7 +1013,7 @@ async fn passphrase_change_signs_out_other_devices() {
 
 #[tokio::test]
 async fn wrong_current_passphrase_changes_nothing() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, _) = h.register("alice", &pass("old")).await;
     let before = h.stored().await;
     let token = &session.access_token;
@@ -890,7 +1048,7 @@ async fn wrong_current_passphrase_changes_nothing() {
 
 #[tokio::test]
 async fn replacement_bundles_must_keep_the_vault_and_recovery_entry() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, account) = h.register("alice", &pass("old")).await;
     let before = h.stored().await;
     let auth = AuthSecret::from_bytes(&[1; 64]).unwrap();
@@ -931,7 +1089,7 @@ async fn replacement_bundles_must_keep_the_vault_and_recovery_entry() {
 
 #[tokio::test]
 async fn recovery_resets_the_passphrase_and_every_session() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (first, account) = h.register("alice", &pass("old")).await;
     let (other, _) = h.login("alice", &pass("old")).await;
     let shown = account.recovery_key.to_display();
@@ -967,7 +1125,7 @@ async fn recovery_resets_the_passphrase_and_every_session() {
 
 #[tokio::test]
 async fn handshakes_started_before_a_credential_change_cannot_finish() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, account) = h.register("alice", &pass("old")).await;
     let token = &session.access_token;
 
@@ -1005,7 +1163,7 @@ async fn handshakes_started_before_a_credential_change_cannot_finish() {
 
 #[tokio::test]
 async fn wrong_recovery_key_and_unknown_user_fail_alike() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("old")).await;
     let before = h.stored().await;
     let mut bodies = Vec::new();
@@ -1026,7 +1184,7 @@ async fn wrong_recovery_key_and_unknown_user_fail_alike() {
 
 #[tokio::test]
 async fn database_holds_no_tokens_verifier_or_passphrase() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let (session, account) = h.register("alice", &pass("1")).await;
     let (login, _) = h.login("alice", &pass("1")).await;
     let tokens: Tokens = h.refresh(&login.session.refresh_token).await.json();
@@ -1071,9 +1229,9 @@ async fn database_holds_no_tokens_verifier_or_passphrase() {
 
 #[tokio::test]
 async fn no_cookies_anywhere() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let mut replies = Vec::new();
-    let (reg, start) = Registration::start("alice", &pass("1")).unwrap();
+    let (reg, start) = Registration::start("alice", &pass("1"), &h.invite().await).unwrap();
     let r = h.post("/auth/register/start", &start, None).await;
     let (finish, _) = reg.finish(&r.json(), Device::default(), 0).unwrap();
     replies.push(r);
@@ -1104,7 +1262,7 @@ async fn no_cookies_anywhere() {
 
 #[tokio::test]
 async fn login_is_limited_per_username_across_addresses() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     h.register("alice", &pass("1")).await;
     for name in ["alice", "nobody"] {
         let (_, start) = Login::start(name, "guess").unwrap();
@@ -1123,7 +1281,7 @@ async fn login_is_limited_per_username_across_addresses() {
 
 #[tokio::test]
 async fn login_start_is_limited_per_address() {
-    let h = harness(RegistrationPolicy::Open).await;
+    let h = harness().await;
     let peer = "192.0.2.50:1000";
     for i in 0..10 {
         let (_, start) = Login::start(&format!("user{i}"), "guess").unwrap();
@@ -1136,8 +1294,8 @@ async fn login_start_is_limited_per_address() {
 }
 
 #[tokio::test]
-async fn recovery_and_registration_are_limited_per_address() {
-    let h = harness(RegistrationPolicy::Open).await;
+async fn recovery_is_limited_per_address() {
+    let h = harness().await;
     let peer = "192.0.2.60:1000";
     let (_, start) =
         Recovery::start("alice", RecoveryKey::generate().unwrap(), &pass("n")).unwrap();
@@ -1148,31 +1306,88 @@ async fn recovery_and_registration_are_limited_per_address() {
     let reply = h.post_from(peer, "/auth/recover/start", &start, None).await;
     assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
     assert!(reply.headers.contains_key(header::RETRY_AFTER));
+}
 
-    let (_, start) = Registration::start("alice", &pass("1")).unwrap();
-    for _ in 0..5 {
+#[tokio::test]
+async fn registration_start_and_finish_share_a_limit() {
+    let h = harness().await;
+    let peer = "192.0.2.61:1000";
+    let (_, start) = Registration::start("alice", &pass("1"), &h.invite().await).unwrap();
+    for i in 0..3 {
         let reply = h
             .post_from(peer, "/auth/register/start", &start, None)
             .await;
-        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.status, StatusCode::OK, "start {i}");
     }
+    let guess = serde_json::json!({
+        "username": "alice",
+        "invite_code": invites::generate(),
+        "registration_upload": "AAAA",
+        "key_bundle": "AAAA",
+        "recovery_verifier": "AAAA",
+    });
+    for i in 0..2 {
+        let reply = h
+            .post_from(peer, "/auth/register/finish", &guess, None)
+            .await;
+        exact_error(&reply, StatusCode::FORBIDDEN, "invalid_invite");
+        assert!(
+            !reply.headers.contains_key(header::RETRY_AFTER),
+            "finish {i}"
+        );
+    }
+
+    // Login from the same address draws from its own limits.
+    let (_, login) = Login::start("alice", "guess").unwrap();
+    let reply = h.post_from(peer, "/auth/login/start", &login, None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+
+    // The sixth registration request is refused before the handler runs: with
+    // the database gone it would otherwise be a 500.
+    h.state.pool.close().await;
+    let reply = h
+        .post_from(peer, "/auth/register/finish", &guess, None)
+        .await;
+    assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(reply.headers.contains_key(header::RETRY_AFTER));
     let reply = h
         .post_from(peer, "/auth/register/start", &start, None)
         .await;
     assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
 }
 
+#[tokio::test]
+async fn registration_limit_is_configurable() {
+    let h = harness_with(&[("NOTEBOOK_REGISTRATION_RATE_LIMIT_BURST", "2")]).await;
+    let peer = "192.0.2.62:1000";
+    let (_, start) = Registration::start("alice", &pass("1"), &h.invite().await).unwrap();
+    for i in 0..2 {
+        let reply = h
+            .post_from(peer, "/auth/register/start", &start, None)
+            .await;
+        assert_eq!(reply.status, StatusCode::OK, "start {i}");
+    }
+    let reply = h
+        .post_from(peer, "/auth/register/start", &start, None)
+        .await;
+    assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+    // Another address is unaffected.
+    let reply = h.post("/auth/register/start", &start, None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+}
+
 // --- end to end ---
 
 #[tokio::test]
 async fn user_add_then_devices_change_and_recover() {
-    let h = harness(RegistrationPolicy::Closed).await;
+    let h = harness().await;
     let shown = user::create(
         &h.state.pool,
         &h.state.auth.setup,
         "Dana",
         &pass("1"),
         false,
+        QUOTA,
     )
     .await
     .unwrap();
@@ -1222,24 +1437,24 @@ async fn user_add_then_devices_change_and_recover() {
 
 #[tokio::test]
 async fn user_add_refuses_bad_input_and_creates_nothing() {
-    let h = harness(RegistrationPolicy::Closed).await;
+    let h = harness().await;
     let (pool, setup) = (&h.state.pool, &h.state.auth.setup);
-    user::create(pool, setup, "root", &pass("1"), true)
+    user::create(pool, setup, "root", &pass("1"), true, QUOTA)
         .await
         .unwrap();
     let (login, _) = h.login("root", &pass("1")).await;
     assert!(login.session.is_admin);
 
     assert!(matches!(
-        user::create(pool, setup, "al ice", &pass("1"), false).await,
+        user::create(pool, setup, "al ice", &pass("1"), false, QUOTA).await,
         Err(user::UserError::InvalidUsername)
     ));
     assert!(matches!(
-        user::create(pool, setup, "ROOT", &pass("2"), false).await,
+        user::create(pool, setup, "ROOT", &pass("2"), false, QUOTA).await,
         Err(user::UserError::UsernameTaken)
     ));
     assert!(matches!(
-        user::create(pool, setup, "short", "elevenchars", false).await,
+        user::create(pool, setup, "short", "elevenchars", false, QUOTA).await,
         Err(user::UserError::PassphraseTooShort)
     ));
     assert_eq!(h.count("users").await, 1);
