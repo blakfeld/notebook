@@ -1,8 +1,8 @@
 # Deploying the Notebook server
 
-A deployment is one `notebook-server` binary and one SQLite database file,
-behind a TLS-terminating reverse proxy, with the database streamed to object
-storage by [Litestream](https://litestream.io). The server only ever holds
+A deployment is one `notebook-server` binary, one SQLite database file, and
+one OPAQUE key file, behind a TLS-terminating reverse proxy, with the database
+streamed to object storage by [Litestream](https://litestream.io). The server only ever holds
 ciphertext, but treat the database as sensitive anyway: it is the only copy of
 every user's encrypted vault.
 
@@ -43,6 +43,8 @@ public_url = "https://notes.example.com"
 bind = "127.0.0.1:8080"
 
 database_path = "/var/lib/notebook/notebook.db"
+# Created on first start. Back it up separately; see "The OPAQUE key file".
+opaque_key_path = "/var/lib/notebook/opaque-server.key"
 static_dir = "/usr/local/share/notebook/web"
 
 # The reverse proxy's address. Its X-Forwarded-For is believed; nobody else's
@@ -63,6 +65,7 @@ log_level = "info"
 | `public_url` | required | `NOTEBOOK_PUBLIC_URL` |
 | `bind` | `127.0.0.1:8080` | `NOTEBOOK_BIND` |
 | `database_path` | `notebook.db` | `NOTEBOOK_DATABASE_PATH` |
+| `opaque_key_path` | `opaque-server.key` | `NOTEBOOK_OPAQUE_KEY_PATH` |
 | `static_dir` | unset (no static hosting) | `NOTEBOOK_STATIC_DIR` |
 | `trusted_proxies` | empty | `NOTEBOOK_TRUSTED_PROXIES` (comma-separated) |
 | `max_body_bytes` | `1048576` | `NOTEBOOK_MAX_BODY_BYTES` |
@@ -90,6 +93,61 @@ notebook-server --config /etc/notebook/notebook.toml serve     # migrate, then s
 requests up to 10 seconds, closes the database, and exits 0. `GET /healthz`
 answers `200` when the database is reachable and `503` when it is not.
 
+## Accounts
+
+Registration over HTTP is closed until invite codes exist, so the operator
+creates accounts. Run this as the service user, so the database and key file
+it may create belong to it:
+
+```sh
+sudo -u notebook notebook-server --config /etc/notebook/notebook.toml user add alice
+```
+
+```text
+$ notebook-server user add -h
+Create an account with its vault, and print its recovery key once
+
+Usage: notebook-server user add [OPTIONS] <USERNAME>
+
+Arguments:
+  <USERNAME>  3 to 32 letters, digits, '.', '_', or '-'; case-insensitive
+
+Options:
+      --admin             Mark the account as an administrator
+      --config <PATH>     Path to a TOML configuration file [env: NOTEBOOK_CONFIG=]
+      --passphrase-stdin  Read the passphrase from one line of stdin instead of prompting (for scripted setups)
+  -h, --help              Print help (see more with '--help')
+```
+
+It prompts twice for the passphrase (at least 12 characters) without echoing
+it, creates the account and its vault, and prints the account's **recovery
+key** once. Give it to the user to keep somewhere safe: it is the only way back
+in if they forget their passphrase, and the server can't reset passwords or
+read notes. The user then signs in from any client with the username and
+passphrase.
+
+## The OPAQUE key file
+
+Logins use OPAQUE, so the server never sees passphrases. Its OPAQUE key
+material lives in the file at `opaque_key_path`, outside the database:
+together, the database and the key file would let an attacker test passphrase
+guesses offline (each guess slowed by Argon2); the database alone does not.
+
+- `serve` and `user add` create the file on first start, when no accounts
+  exist yet, with mode `0600`. Its fingerprint is recorded in the database.
+- **Back it up once, separately from the database**: for example in the
+  operator's password manager or an offline copy. Never put it in the
+  Litestream bucket or next to database backups, which would undo the point of
+  keeping it apart. It never changes, so one backup is enough.
+- If the file is missing while accounts exist, or doesn't match the
+  fingerprint in the database, the server refuses to start rather than
+  generating a new key (which would lock out every user). Restore the file
+  from its backup.
+- If the key file is lost for good, no notes are lost, but every passphrase
+  stops working: users must recover with their recovery keys. This release has
+  no command for replacing a lost key (one is planned with key rotation), so
+  keep that backup.
+
 ## Service user and file permissions
 
 ```sh
@@ -99,8 +157,8 @@ install -d -o root -g notebook -m 0750 /etc/notebook
 install -o root -g notebook -m 0640 notebook.toml /etc/notebook/notebook.toml
 ```
 
-The database and its `-wal` and `-shm` files are created by the service user
-inside `/var/lib/notebook`, which only that user can enter. The `UMask=0077`
+The database, its `-wal` and `-shm` files, and the OPAQUE key file are created
+by the service user inside `/var/lib/notebook`, which only that user can enter. The `UMask=0077`
 below keeps new files private as well.
 
 ## systemd

@@ -20,7 +20,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 ## Server
 
 6. [x] `server-foundation`: axum binary, config, SQLite, static hosting, rate limits, security headers, operator CLI
-7. [ ] `opaque-accounts`: OPAQUE register/login, sessions, server-stored encrypted key bundle, recovery
+7. [x] `opaque-accounts`: OPAQUE register/login, sessions, server-stored encrypted key bundle, recovery
 8. [ ] `sync-server`: encrypted op log, bootstrap, incremental pull, WebSocket live updates, compaction
 
 ## Sync and first client

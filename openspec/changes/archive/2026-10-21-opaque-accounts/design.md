@@ -148,14 +148,15 @@ One `sessions` row per device login:
 sessions(session_id BLOB PK, vault_id BLOB, user_id BLOB, device_name TEXT, kind TEXT,
          access_hash BLOB UNIQUE, access_expires_at INT,
          refresh_hash BLOB UNIQUE, refresh_expires_at INT,
-         prev_refresh_hash BLOB UNIQUE NULL,
          created_at INT, last_used_at INT)
 index (vault_id), index (user_id)
+refresh_history(hash BLOB PK, session_id BLOB REFERENCES sessions ON DELETE CASCADE)
 ```
 
 - Tokens are random 32-byte values; the database stores `SHA-256(token)` and lookups go by hash (an indexed equality on a hash is not a timing oracle for the token). Opaque random tokens over JWTs: revocation is immediate, nothing to sign or rotate, and every request already hits SQLite.
 - Access: 15 minutes. Refresh: 30 days from issue for `native` sessions and 12 hours for `browser` sessions, renewed on each rotation (so a session stays alive while it is used). Constants, not config. The browser keeps its refresh token in memory only and doesn't log out on tab close, so the short lifetime bounds how long an abandoned tab's session lingers; the kind is a client hint, not a security boundary (a client claiming `native` only gets what any native client gets).
-- Refresh rotates both tokens and moves the old refresh hash to `prev_refresh_hash`. A presented token matching some session's `prev_refresh_hash` deletes that session (reuse detection).
+- Refresh rotates both tokens and records the old refresh hash in `refresh_history`. A presented token matching any session's history deletes that session (reuse detection). Keeping every exchanged hash, not just the last, matters: a thief who rotates twice would otherwise make the victim's original token match nothing. History rows go with their session.
+- A login or passphrase change remembers the OPAQUE record its login half was checked against, and its finish re-reads the record inside the finish transaction, failing with `invalid_credentials` if it changed. Otherwise a handshake started before a passphrase change or recovery could finish after it and get a session past the revocation.
 - Refresh failures caused by a missing session (revoked, logged out, expired, reuse-detected, or unknown token) return `401 session_ended`, distinct from `invalid_token` on access-token checks. Core's client exposes `RefreshOutcome::{Refreshed(Tokens), SessionEnded, Transient}` by classifying the response, so `sync-client-engine` can tell "log in again" apart from "retry later" and keep the refresh token on transient failure.
 - Revocation, logout, and reuse delete the row. `last_used_at` updates on refresh and at most once a minute on access, to avoid a write per request.
 - A background task deletes rows with `refresh_expires_at < now` hourly.
@@ -222,6 +223,7 @@ The existing trace layer logs only method, path, status, and latency, so tokens 
 - [In-memory pending handshakes and limiters reset on restart] → A login in flight during a restart fails and is retried; counters resetting is accepted (same as `server-foundation`).
 - [Per-username limiter allows a soft lockout of a known username] → Bounded to the refill rate; per-address limits still apply to the attacker.
 - [`recover/start` returns the key bundle to anyone with the verifier] → The verifier requires the recovery key, which can already unwrap the bundle; nothing new is exposed.
+- [The verifier alone is enough to complete recovery: re-uploading the unchanged bundle with a new OPAQUE record passes the bundle checks] → Whoever holds it can lock the user out and get a session, but sees only ciphertext (the auth entry still wraps under the old export key). It only leaves the client in the two request bodies, whose `Debug` omits it; the server stores only its hash. A challenge-response on a key derived from the recovery key would close this and is deferred.
 - [Usernames are ASCII-only] → Simple and unambiguous; can be widened later without breaking existing names.
 
 ## Migration Plan

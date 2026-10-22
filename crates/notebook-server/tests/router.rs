@@ -14,7 +14,7 @@ use axum::routing::{get, post};
 use http_body_util::BodyExt;
 use notebook_server::app::{self, AppState};
 use notebook_server::config::Config;
-use notebook_server::{db, security};
+use notebook_server::{auth, db, security};
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -30,7 +30,7 @@ async fn state(config: Config) -> (AppState, TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let pool = db::connect(&dir.path().join("db")).await.unwrap();
     db::migrate(&pool).await.unwrap();
-    (AppState::new(pool, config), dir)
+    (AppState::new(pool, config, auth::keyfile::generate()), dir)
 }
 
 async fn send_from(router: &Router, peer: &str, request: Request<Body>) -> Response<Body> {

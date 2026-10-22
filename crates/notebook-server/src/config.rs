@@ -14,6 +14,10 @@ use serde::Deserialize;
 pub struct Config {
     pub bind: SocketAddr,
     pub database_path: PathBuf,
+    /// The OPAQUE server key file. Kept out of the database (and its
+    /// replica) so a copy of the database alone can't be used to test
+    /// passphrase guesses.
+    pub opaque_key_path: PathBuf,
     /// The origin clients reach the server at, `http://` or `https://`.
     pub public_url: String,
     pub static_dir: Option<PathBuf>,
@@ -98,6 +102,12 @@ impl Config {
         if database_path.as_os_str().is_empty() {
             return Err(invalid("database_path", "", "must not be empty"));
         }
+        let opaque_key_path: PathBuf = env_value(&env, "opaque_key_path")?
+            .or(file.opaque_key_path)
+            .unwrap_or_else(|| PathBuf::from("opaque-server.key"));
+        if opaque_key_path.as_os_str().is_empty() {
+            return Err(invalid("opaque_key_path", "", "must not be empty"));
+        }
         let static_dir: Option<PathBuf> = env_value(&env, "static_dir")?.or(file.static_dir);
         if static_dir
             .as_ref()
@@ -111,6 +121,7 @@ impl Config {
                 .or(file.bind)
                 .unwrap_or(SocketAddr::from(([127, 0, 0, 1], 8080))),
             database_path,
+            opaque_key_path,
             public_url,
             static_dir,
             // Peers are compared in canonical form (IPv4-mapped IPv6 as IPv4).
@@ -195,6 +206,7 @@ impl std::error::Error for ConfigError {}
 struct FileConfig {
     bind: Option<SocketAddr>,
     database_path: Option<PathBuf>,
+    opaque_key_path: Option<PathBuf>,
     public_url: Option<String>,
     static_dir: Option<PathBuf>,
     trusted_proxies: Option<Vec<IpAddr>>,
@@ -276,6 +288,7 @@ mod tests {
         let config = load(None, &[URL]).unwrap();
         assert_eq!(config.bind, "127.0.0.1:8080".parse().unwrap());
         assert_eq!(config.database_path, PathBuf::from("notebook.db"));
+        assert_eq!(config.opaque_key_path, PathBuf::from("opaque-server.key"));
         assert_eq!(config.static_dir, None);
         assert!(config.trusted_proxies.is_empty());
         assert_eq!(config.max_body_bytes.get(), 1_048_576);
@@ -351,6 +364,7 @@ mod tests {
         for (var, key) in [
             ("NOTEBOOK_DATABASE_PATH", "database_path"),
             ("NOTEBOOK_STATIC_DIR", "static_dir"),
+            ("NOTEBOOK_OPAQUE_KEY_PATH", "opaque_key_path"),
         ] {
             let err = load(None, &[URL, (var, "")]).unwrap_err().to_string();
             assert!(err.contains(key), "{err}");
@@ -358,6 +372,15 @@ mod tests {
             let err = load(Some(&file), &[]).unwrap_err().to_string();
             assert!(err.contains(key), "{err}");
         }
+    }
+
+    #[test]
+    fn opaque_key_path_from_file_and_env() {
+        let file = "public_url = \"http://localhost\"\nopaque_key_path = \"/etc/nb/key\"\n";
+        let config = load(Some(file), &[]).unwrap();
+        assert_eq!(config.opaque_key_path, PathBuf::from("/etc/nb/key"));
+        let config = load(Some(file), &[("NOTEBOOK_OPAQUE_KEY_PATH", "/run/key")]).unwrap();
+        assert_eq!(config.opaque_key_path, PathBuf::from("/run/key"));
     }
 
     #[test]
