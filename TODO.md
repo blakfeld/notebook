@@ -14,7 +14,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 1. [x] `scaffold-workspace`: Cargo workspace (core, server, app), TS frontend, CI, wasm32 build check
 2. [x] `note-model-and-tags`: note model, Bear-style nested inline tags, derived tag tree, tag rename
 3. [x] `vault-encryption`: key hierarchy, per-note keys, XChaCha20-Poly1305, recovery key
-4. [ ] `crdt-note-documents`: per-note CRDT docs (Yrs), encrypted updates and snapshots
+4. [x] `crdt-note-documents`: per-note CRDT docs (Yrs), encrypted updates and snapshots
 5. [ ] `local-sqlite-storage`: Storage trait, SQLite (native) and in-memory implementations
 
 ## Server

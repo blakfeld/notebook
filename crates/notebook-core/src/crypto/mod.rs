@@ -146,7 +146,7 @@ impl FromStr for VaultId {
 }
 
 /// Fills `dest` from the platform's secure random source.
-fn fill_random(dest: &mut [u8]) -> Result<(), CryptoError> {
+pub(crate) fn fill_random(dest: &mut [u8]) -> Result<(), CryptoError> {
     getrandom::fill(dest).map_err(|_| CryptoError::Random)
 }
 

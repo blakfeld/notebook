@@ -41,7 +41,9 @@ Text offsets: `Options::offset_kind = OffsetKind::Utf16`, matching Yjs and CodeM
 
 ### Client IDs are drawn inside the module
 
-Each `NoteDocument` instance gets a fresh random client ID, drawn with the crate's existing secure-random helper and masked to 32 bits, which is what Yjs generates, so the IDs stay exact as JS numbers if updates ever reach `yjs`. Two live replicas that share a client ID and have diverged corrupt each other irrecoverably, so callers aren't allowed to pick one. As in `crypto`, a `pub(crate)` constructor takes a fixed client ID for the test vector. A new ID on every open costs a few bytes of state-vector growth per session, which compaction absorbs.
+Each `NoteDocument` instance gets a fresh random client ID, drawn with the crate's existing secure-random helper and masked to 32 bits, which is what Yjs generates, so the IDs stay exact as JS numbers if updates ever reach `yjs`. Two live replicas that share a client ID and have diverged corrupt each other irrecoverably, so callers aren't allowed to pick one. 32-bit IDs drawn on every open can still collide. Each instance therefore records the clock it has reached under its own ID. If an applied update brings in more than that under the same ID, it rebuilds its doc from its own encoded state (held updates included) under a fresh ID, which is the rotation Yjs does. Edits the two made concurrently before the collision was seen can still be lost; rotation stops further damage. As in `crypto`, a `pub(crate)` constructor takes a fixed client ID for the test vector. A new ID on every open costs a few bytes of state-vector growth per session, which compaction absorbs.
+
+Yrs is built with its `small-client` feature, so its `ClientID` is 32 bits too. Without it, decoding an update that names a client ID above 53 bits trips a `debug_assert!` in Yrs's `ClientID::new` and panics in debug builds, which the randomized bad-input unit test found. With it, client IDs are read as 32-bit varints (oversized values wrap), so bad input can't panic. The cost is that updates from 53-bit-ID peers (Yjs v14+, default-featured Yrs) don't decode, so the editor's `yjs` must use 32-bit client IDs (Yjs 13 does by default).
 
 **Alternative considered:** a persisted per-device client ID. Rejected for now: it saves bytes but brings back the reuse hazard (restored backups, a crash before the outbox flushes). Revisit if state vectors grow noticeably.
 
@@ -75,7 +77,7 @@ impl NoteDocument {
 
 - The document **owns** its `NoteKey` (keys aren't `Clone`). Storage or sync unwraps the note key once and hands it over. Every mutator defined here returns ciphertext, so nothing this change adds hands plaintext to storage or sync. The only plaintext path is the editor exchange that `note-editor-component` adds (`EditorUpdate`, `editor_attach`, `apply_editor_update`, `editor_pending`). It is a distinct type, and its `apply_editor_update` returns an `EncryptedUpdate` for sync. `Debug` is redacted.
 - Each local edit runs in one `TransactionMut`, and the returned update is that transaction's own `encode_update_v1()` (only its inserts and deletes), not `encode_diff_v1`, which would repeat the whole delete set every time. Mutators compare against the current value first and open no transaction for a no-op, which is how "no-op change yields nothing" is met.
-- `note()` builds a `notes::Note` through a new `pub(crate) Note::from_parts`, so title and tag derivation stay in one place. It returns `None` until `meta.created` is present. Reading `meta` is tolerant: a flag that isn't a bool reads as `false`, an `updated` that isn't an integer reads as `created`, unknown keys are ignored. Only the user's own clients hold the note key, so a wrongly typed value is a bug, not an attack, and it must not make the note unreadable. Timestamps are written as `Any::BigInt(i64)`; readers also accept `Any::Number` holding an integral value, since a JS `yjs` writer would produce that.
+- `note()` builds a `notes::Note` through a new `pub(crate) Note::from_parts`, so title and tag derivation stay in one place. It returns `None` until `meta.created` is present. Reading `meta` is tolerant: a flag that isn't a bool reads as `false`, an `updated` that isn't an integer reads as `created`, unknown keys are ignored. Only the user's own clients hold the note key, so a wrongly typed value is a bug, not an attack, and it must not make the note unreadable. Timestamps are written as `Any::Number(Number::Int(i64))`, which lib0 encodes as a float64 above 32 bits (exact up to 2^53 ms); readers accept `Number::Int` and any integral `Number::Float`, which is also what a JS `yjs` writer produces.
 - `DocumentError { Crypto(CryptoError), UnsupportedFormat(u8), Malformed }`. The crypto variant passes through decryption and unsupported-envelope errors unchanged.
 - `sync-client-engine` later adds `NoteDocument::full_update() -> EncryptedUpdate` for its server-restore resync: the same format-1 full-state bytes as `snapshot()`, encrypted as `CrdtUpdate` instead of `CrdtSnapshot`. It uses only the formats defined here and changes no `note-documents` requirement.
 
@@ -89,22 +91,64 @@ impl NoteDocument {
 
 Tag rename (already implemented over `Note`) will call `set_body` with the rewritten body, which turns into one small edit per renamed occurrence. Wiring that up belongs to the app/sync changes.
 
-### Error atomicity
+### Error atomicity and untrusted input
 
-`apply_update` / `load_snapshot` decrypt, check the format byte, then `Update::decode_v1` *before* opening a transaction. Decode is where malformed input fails, so the document is untouched. Yrs's `apply_update` can still return `UpdateError` after decoding, for structurally valid but inconsistent updates. Those are mapped to `Malformed`. To keep the "state unchanged" guarantee there too, we test it with the fuzz-style tests in tasks rather than cloning the doc on every apply. If a failing case turns up, we fall back to applying into a scratch clone for untrusted input.
+Only key holders can produce an update that decrypts. In practice that is the user's own devices, possibly buggy or compromised, or the browser client running JS it was served. An update that decrypts is still untrusted: it is stored and synced, so a bad one would reach every device on every sync.
 
-Updates missing their dependencies are kept in Yrs's pending store and integrate automatically once the gap fills. That's the out-of-order requirement, at no extra cost.
+Two reviews showed that Yrs 0.28 is not safe against crafted input:
+
+- **Allocations:** counts size allocations up front. A 6-byte payload declaring `u32::MAX` clients reserves about 8.6 GB.
+- **Clock arithmetic:** unchecked, with `i32` offsets. Debug builds panic and release builds wrap.
+- **Integration bugs:**
+  - Integration can fail partway (`UpdateError::InvalidParent`).
+  - It has `unwrap`/`unreachable!` panics on shapes its encoder never produces.
+  - Worst, it has memory-safety bugs. A block below a client's clock overwrote a live item, a use-after-free that segfaulted release builds. Splitting unintegrated items left dangling neighbour links.
+
+The defence has two layers.
+
+1. **Structural check** (`document/validate.rs`). `apply_update` / `load_snapshot` decrypt, check the format byte, and walk the payload with a strict reader of our own before Yrs sees it, all before opening a transaction. The payload is rejected as `Malformed` when:
+   - the plaintext is over `MAX_PLAINTEXT_LEN` (16 MiB);
+   - an unsigned varint is above `u32::MAX` or longer than five bytes, so the check and Yrs never disagree on a value's width;
+   - an `Any` integer is longer than nine bytes;
+   - a count is larger than the bytes that remain;
+   - a clock, origin clock, or clock range ends above `i32::MAX`;
+   - a client appears twice in the block section or the delete set;
+   - deleted ranges aren't sorted, disjoint, and non-empty;
+   - a block is empty;
+   - an item names its parent by ID (a note document has no nested types) or a root other than `body`/`meta`;
+   - content is anything but a string, `Any` values, or a deleted range (no embeds, formats, nested types, binary, JSON, or subdocuments);
+   - an `Any` nests more than 32 levels deep;
+   - bytes follow the delete set.
+
+   Everything a note document emits, snapshots with held updates included, passes. What passes decodes with bounded allocations, and can't fail integration with an error, so a rejected payload leaves the document unchanged without cloning it on every apply.
+
+2. **Held-update retry** (in `NoteDocument::apply`). Yrs retries held blocks only when a missing client's clock moves. An update that fills a gap Yrs already skipped over satisfies a held dependency without moving the clock, so the held blocks would stay stuck and replicas would diverge on ordinary out-of-order delivery. After every apply, the held blocks are taken out and applied once more in the same transaction; whatever still can't integrate goes back to being held.
+
+The remaining Yrs integration bugs (a use-after-free when blocks overlap integrated content, dangling links on split unintegrated items, and a few panics) are reachable only by a crafted update that passes the check. A patched, vendored Yrs was tried and dropped: carrying a fork is more than a personal app needs. A draft upstream report covers them, and the risk is accepted (see Risks).
+
+Regression tests pin every reviewer payload, and the randomized unit test covers byte flips, truncations, and structured updates with extreme values. Dedicated coverage-guided fuzzing (`cargo-fuzz` with AddressSanitizer) was tried, found the split-item use-after-free, and was dropped as more than a personal app needs.
+
+The schema restriction binds future writers too. `note-editor-component`'s `yjs` must only insert plain text into `body`, which `y-codemirror.next` does.
+
+A value in `body` passes the check, because an item's parent is only known once integrated. Yrs counts it as an offset when inserting but skips it when removing. So when the body holds one, `set_body` falls back to removing all string content and inserting the new body at offset 0. Only a foreign writer can put one there.
+
+Updates missing their dependencies are kept in Yrs's pending store and integrate once the gap fills, with the retry above covering the case Yrs misses. That's the out-of-order requirement.
 
 ## Risks / Trade-offs
 
 - [Long-lived format tied to Yrs's encoding] → It's the Yjs v1 wire format, which is stable and widely implemented. The format byte reserves a migration path, and a test vector pins the bytes so a Yrs upgrade that changes output fails CI.
 - [Yrs pulls in `fastrand` with `js`, i.e. a second `getrandom` (0.2) on wasm, plus `serde_json`, `dashmap`, `async-lock`] → Task 1 verifies the wasm32 build. Our own randomness still goes through `getrandom` 0.4. `fastrand` is only used where Yrs would pick a client ID itself, and we always supply one.
 - [LWW `updated` can settle on the earlier of two concurrent times] → Accepted (sorting only). If it matters later, a per-client max can be added as a new `meta` key.
-- [`apply_update` partial-apply on inconsistent input] → Decode first, fuzz-test the state-unchanged property, scratch-clone fallback if needed.
+- [Yrs 0.28 is unsafe on crafted updates: allocation bombs, clock overflow, panics, use-after-free] → Structural check (see "Error atomicity and untrusted input"). Residual risk: Yrs 0.28's known integration bugs, and possibly others, stay reachable by a crafted update from a key holder. Such an update could crash or corrupt every device until it is purged. Revisit when upstream fixes them. Accepted for key holders only; outsiders can't produce an update that decrypts.
+- [The held-update retry depends on Yrs's pending store API (`WriteTxn::store_mut`, `Store::pending_update_mut`)] → Pinned by the out-of-order regression tests, so an upgrade that changes it fails CI. Drop the retry once upstream fixes the bug.
+- [Schema check ties writers to plain text in `body`] → Matches what `y-codemirror.next` writes. Widening it (for example for embeds) is a new format decision.
+- [`small-client` limits interop to 32-bit client IDs] → Matches what this design already generates and what Yjs 13 uses. `note-editor-component` must keep the webview's `yjs` on 32-bit IDs.
 - [Fresh client ID per open grows state vectors] → Snapshots compact them. Revisit with a persisted device ID if measurements warrant it.
 - [Metadata leaks: update count, size, and timing per note] → Already accepted in the vault-crypto threat model.
-- [Decrypted body lives in the Yrs doc and can't be zeroized on drop] → Same exposure as the plaintext `Note` the app already holds. Decrypted update and snapshot bytes are kept in `Zeroizing` buffers until decoded.
-- [`dissimilar` diff cost on large bodies] → Myers is O(ND); notes are small and `set_body` is off the keystroke path. Revisit only if tag rename across a large vault is measurably slow.
+- [Decrypted body lives in the Yrs doc and can't be zeroized on drop] → Same exposure as the plaintext `Note` the app already holds. Decrypted update and snapshot bytes, encoded payloads before encryption, and the body read for diffing are kept in `Zeroizing` buffers. Yrs's own internal buffers can't be wiped.
+- [`dissimilar` diff cost on large bodies] → Myers is O(ND), and a full rewrite of a 100 KB body took about 23 s in review. Notes are small and `set_body` is off the keystroke path. Deferred: a future import feature should fall back to prefix/suffix trimming above a size budget.
+- [Replaying long histories is slow (about 2 s for 4000 small updates)] → Legitimate data, so it's handled by snapshotting early in `sync-client-engine`.
+- [`smallstr`, a transitive Yrs dependency, is flagged unmaintained (RUSTSEC-2026-0215, informational)] → Tracked. No patched version exists.
 
 ## Migration Plan
 
