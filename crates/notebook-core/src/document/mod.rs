@@ -63,6 +63,15 @@
 //! [`EncryptedSnapshot`], and remote data is accepted only as ciphertext, so
 //! nothing here hands plaintext to storage or sync.
 //!
+//! The one plaintext path is the editor exchange, with the editor replica
+//! open on this device: [`NoteDocument::editor_attach`],
+//! [`NoteDocument::apply_editor_update`], and
+//! [`NoteDocument::editor_pending`]. Its updates are [`EditorUpdate`]s, a
+//! separate type with no format byte and no conversion to or from the
+//! encrypted types, and every editor update accepted comes back out as an
+//! [`EncryptedUpdate`]. Editor updates get the same structural check as
+//! decrypted remote data.
+//!
 //! # Untrusted input
 //!
 //! An update that decrypts came from a key holder, but it is still
@@ -93,6 +102,6 @@ mod doc;
 mod format;
 mod validate;
 
-pub use doc::NoteDocument;
-pub use format::{DocumentError, EncryptedSnapshot, EncryptedUpdate, FORMAT_V1};
+pub use doc::{EditorSync, NoteDocument};
+pub use format::{DocumentError, EditorUpdate, EncryptedSnapshot, EncryptedUpdate, FORMAT_V1};
 pub use validate::MAX_PLAINTEXT_LEN;

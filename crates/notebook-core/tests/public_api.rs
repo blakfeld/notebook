@@ -261,3 +261,62 @@ fn storing_a_vault_locally() {
     );
     store.clear().unwrap();
 }
+
+#[test]
+fn editing_through_the_editor_exchange() {
+    use notebook_core::document::{EditorSync, EditorUpdate, NoteDocument};
+    use notebook_core::sync::{EditorSessionId, Replica, ReplicaError};
+    use yrs::updates::decoder::Decode;
+    use yrs::{GetString, Text, Transact, Update};
+
+    // The editor's replica: a Yjs-compatible doc bound to `body`.
+    let editor = yrs::Doc::new();
+    let body = editor.get_or_insert_text("body");
+    let load = |update: &EditorUpdate| {
+        let update = Update::decode_v1(update.as_bytes()).unwrap();
+        editor.transact_mut().apply_update(update).unwrap();
+    };
+    let type_at_end = |text: &str| {
+        let mut txn = editor.transact_mut();
+        let end = body.len(&txn);
+        body.insert(&mut txn, end, text);
+        EditorUpdate::from_bytes(txn.encode_update_v1())
+    };
+
+    let vault: VaultId = "01ARZ3NDEKTSV4RRFFQ69G5FAV".parse().unwrap();
+    let store = MemoryStorage::new(vault);
+    let mut replica = Replica::open(store, VaultKey::generate().unwrap()).unwrap();
+    let note = replica.create_note("Hi", Timestamp(1)).unwrap();
+    let (session, state): (EditorSessionId, EditorUpdate) = replica.editor_attach(note).unwrap();
+    load(&state);
+    assert_eq!(body.get_string(&editor.transact()), "Hi");
+
+    assert_eq!(
+        replica.apply_editor_update(session, &type_at_end("!"), Timestamp(2)),
+        Ok(true)
+    );
+    assert_eq!(replica.note(note).unwrap().body(), "Hi!");
+    assert_eq!(replica.pending().unwrap(), 2);
+    load(&replica.editor_pending(session).unwrap().unwrap());
+    replica.editor_detach(session);
+    assert_eq!(
+        replica.editor_pending(session),
+        Err(ReplicaError::EditorSessionNotFound(session))
+    );
+
+    // The document-level building blocks are public too.
+    let (mut doc, _) = NoteDocument::create(
+        vault,
+        id(9),
+        NoteKey::generate().unwrap(),
+        "x",
+        Timestamp(1),
+    )
+    .unwrap();
+    let (_, mut sync): (EditorUpdate, EditorSync) = doc.editor_attach();
+    assert_eq!(doc.editor_pending(&mut sync), None);
+    assert!(
+        doc.apply_editor_update(&mut sync, &EditorUpdate::from_bytes(vec![1]), Timestamp(2))
+            .is_err()
+    );
+}

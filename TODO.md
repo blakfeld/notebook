@@ -29,8 +29,8 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 ## Wave 1 (can start now)
 
-- [ ] `note-editor-component`: CodeMirror 6 markdown editor, CRDT binding, optional per-device vim mode
-  - Needs: nothing outstanding. Frontend (`web/src/editor/`) plus the `note-documents` editor exchange.
+- [x] `note-editor-component`: CodeMirror 6 markdown editor, CRDT binding, optional per-device vim mode
+  - Open manual checks: Firefox and Safari under the server CSP (tasks 9.1), `cargo tauri dev` (9.2).
 - [x] `invite-codes`: invite-gated registration, per-vault storage quotas
   - Needs: nothing outstanding. Server and `notebook-core::auth`; no UI.
 

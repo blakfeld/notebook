@@ -8,6 +8,8 @@ const host = process.env.TAURI_DEV_HOST
 // Tauri's devUrl expects the dev server on a fixed port.
 export default defineConfig({
   plugins: [svelte()],
+  // Component tests mount Svelte's client build, not its server one.
+  resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   clearScreen: false,
   server: {
     port: 5173,
