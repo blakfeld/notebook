@@ -29,7 +29,6 @@ jobs:
               - "crates/**"
               - "web/**"
               - "scripts/**"
-              - "vendor/**"
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"

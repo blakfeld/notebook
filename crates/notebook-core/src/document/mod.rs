@@ -83,8 +83,11 @@
 //! format, is rejected before the document is touched, so it stays
 //! unchanged.
 //!
-//! Yrs itself is vendored with fixes for integration bugs a stateless check
-//! can't rule out (`vendor/yrs/VENDORED.md`).
+//! Yrs 0.28 still has integration bugs that a crafted update from a key
+//! holder could reach and that a stateless check can't rule out. That risk is
+//! accepted. Held updates are also retried after every apply, working around
+//! a Yrs bug that would otherwise leave them stuck on ordinary out-of-order
+//! delivery.
 
 mod doc;
 mod format;

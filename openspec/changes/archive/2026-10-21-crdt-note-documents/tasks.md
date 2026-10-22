@@ -51,6 +51,7 @@
 - [x] 8.3 Update `design.md` (vendored Yrs and its patches, residual risk for key holders), the module docs, and the proposal where claims changed; draft the upstream y-crdt issue text for the user to file
 - [x] 8.4 Retry held updates in the vendored Yrs whenever new blocks arrive, so a held update whose dependency fills an integrated skip integrates (found in the final review: replicas diverged on ordinary out-of-order delivery); verify `held_update_integrates_when_a_skip_fills` and `shuffled_delivery_converges` fail without the patch and pass with it
 - [x] 8.5 Run `scripts/check.sh` and `openspec validate --strict`, and a final quick code-reviewer pass (a full security round is unnecessary for a personal app)
+- [x] 8.6 Drop the vendored Yrs and go back to Yrs 0.28 from crates.io, reverting 8.2 and the patch half of 8.4; carrying a fork is more than a personal app needs. Keep the structural check. Move the held-update retry into `NoteDocument::apply`: after every apply, take the held blocks and apply them once more. Accept the remaining crafted-input Yrs bugs as a risk limited to key holders. Verify that the out-of-order regression tests fail without the retry and pass with it
 
 ## Workflow follow-up
 

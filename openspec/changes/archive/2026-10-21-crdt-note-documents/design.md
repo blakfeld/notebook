@@ -122,31 +122,25 @@ The defence has two layers.
 
    Everything a note document emits, snapshots with held updates included, passes. What passes decodes with bounded allocations, and can't fail integration with an error, so a rejected payload leaves the document unchanged without cloning it on every apply.
 
-2. **Vendored, patched Yrs** (`vendor/yrs`, see its `VENDORED.md`). A stateless check can't rule out every bad interaction with the document's existing state, so the integration bugs are fixed at the source:
-   - a block below a client's clock is integrated only if it fits inside one integrated skip, and is dropped otherwise;
-   - unintegrated split items carry no neighbour links;
-   - clock offsets don't overflow;
-   - `BlockSet::exclude` doesn't unwrap an empty list;
-   - `BlockStore::push` asserts instead of overwriting a live block;
-   - held updates are retried whenever new blocks arrive, not only when a client's clock moves. Before this, a held update whose dependency filled an integrated skip stayed stuck, and replicas diverged on ordinary out-of-order delivery.
+2. **Held-update retry** (in `NoteDocument::apply`). Yrs retries held blocks only when a missing client's clock moves. An update that fills a gap Yrs already skipped over satisfies a held dependency without moving the clock, so the held blocks would stay stuck and replicas would diverge on ordinary out-of-order delivery. After every apply, the held blocks are taken out and applied once more in the same transaction; whatever still can't integrate goes back to being held.
 
-   The fixes go upstream to y-crdt. Once upstream ships them, the vendored copy goes away.
+The remaining Yrs integration bugs (a use-after-free when blocks overlap integrated content, dangling links on split unintegrated items, and a few panics) are reachable only by a crafted update that passes the check. A patched, vendored Yrs was tried and dropped: carrying a fork is more than a personal app needs. A draft upstream report covers them, and the risk is accepted (see Risks).
 
-Regression tests pin every reviewer payload, and the randomized unit test covers byte flips, truncations, and structured updates with extreme values. Dedicated coverage-guided fuzzing (`cargo-fuzz` with AddressSanitizer) was tried, and it found the split-item use-after-free. It was then dropped as more than a personal app needs.
+Regression tests pin every reviewer payload, and the randomized unit test covers byte flips, truncations, and structured updates with extreme values. Dedicated coverage-guided fuzzing (`cargo-fuzz` with AddressSanitizer) was tried, found the split-item use-after-free, and was dropped as more than a personal app needs.
 
 The schema restriction binds future writers too. `note-editor-component`'s `yjs` must only insert plain text into `body`, which `y-codemirror.next` does.
 
 A value in `body` passes the check, because an item's parent is only known once integrated. Yrs counts it as an offset when inserting but skips it when removing. So when the body holds one, `set_body` falls back to removing all string content and inserting the new body at offset 0. Only a foreign writer can put one there.
 
-Updates missing their dependencies are kept in Yrs's pending store and integrate automatically once the gap fills. That's the out-of-order requirement, at no extra cost.
+Updates missing their dependencies are kept in Yrs's pending store and integrate once the gap fills, with the retry above covering the case Yrs misses. That's the out-of-order requirement.
 
 ## Risks / Trade-offs
 
 - [Long-lived format tied to Yrs's encoding] → It's the Yjs v1 wire format, which is stable and widely implemented. The format byte reserves a migration path, and a test vector pins the bytes so a Yrs upgrade that changes output fails CI.
 - [Yrs pulls in `fastrand` with `js`, i.e. a second `getrandom` (0.2) on wasm, plus `serde_json`, `dashmap`, `async-lock`] → Task 1 verifies the wasm32 build. Our own randomness still goes through `getrandom` 0.4. `fastrand` is only used where Yrs would pick a client ID itself, and we always supply one.
 - [LWW `updated` can settle on the earlier of two concurrent times] → Accepted (sorting only). If it matters later, a per-client max can be added as a new `meta` key.
-- [Yrs 0.28 is unsafe on crafted updates: allocation bombs, clock overflow, panics, use-after-free] → Structural check and vendored patches (see "Error atomicity and untrusted input"). Residual risk: further Yrs bugs reachable by a key holder may remain, since there is no ongoing fuzzing. Such a bug could crash or corrupt every device until the offending update is purged. Accepted for key holders only; outsiders can't produce an update that decrypts.
-- [Vendored Yrs drifts from upstream] → Every change is marked `NOTEBOOK PATCH` and listed in `vendor/yrs/VENDORED.md`. Upgrading means re-applying or dropping each patch and re-running the regression tests.
+- [Yrs 0.28 is unsafe on crafted updates: allocation bombs, clock overflow, panics, use-after-free] → Structural check (see "Error atomicity and untrusted input"). Residual risk: Yrs 0.28's known integration bugs, and possibly others, stay reachable by a crafted update from a key holder. Such an update could crash or corrupt every device until it is purged. Revisit when upstream fixes them. Accepted for key holders only; outsiders can't produce an update that decrypts.
+- [The held-update retry depends on Yrs's pending store API (`WriteTxn::store_mut`, `Store::pending_update_mut`)] → Pinned by the out-of-order regression tests, so an upgrade that changes it fails CI. Drop the retry once upstream fixes the bug.
 - [Schema check ties writers to plain text in `body`] → Matches what `y-codemirror.next` writes. Widening it (for example for embeds) is a new format decision.
 - [`small-client` limits interop to 32-bit client IDs] → Matches what this design already generates and what Yjs 13 uses. `note-editor-component` must keep the webview's `yjs` on 32-bit IDs.
 - [Fresh client ID per open grows state vectors] → Snapshots compact them. Revisit with a persisted device ID if measurements warrant it.

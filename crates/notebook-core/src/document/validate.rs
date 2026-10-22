@@ -4,8 +4,9 @@
 //! front, clock arithmetic is unchecked, and its integration assumes the
 //! shapes its own encoder produces. Every payload is walked here first with
 //! a strict reader of our own, and anything outside what a note document
-//! writes is rejected before Yrs sees it. The vendored Yrs carries fixes for
-//! the integration bugs this can't rule out on its own (see the design).
+//! writes is rejected before Yrs sees it. Some Yrs integration bugs remain
+//! reachable by a crafted update from a key holder; that risk is accepted
+//! (see the design).
 
 use std::collections::HashSet;
 

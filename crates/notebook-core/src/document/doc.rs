@@ -7,7 +7,7 @@ use yrs::types::GetString;
 use yrs::updates::decoder::Decode;
 use yrs::{
     Any, ClientID, Doc, Map, MapRef, Number, OffsetKind, Options, Out, ReadTxn, StateVector, Text,
-    TextRef, Transact, TransactionMut, Update,
+    TextRef, Transact, TransactionMut, Update, WriteTxn,
 };
 use zeroize::Zeroizing;
 
@@ -267,6 +267,21 @@ impl NoteDocument {
             let mut txn = self.doc.transact_mut();
             txn.apply_update(update)
                 .map_err(|_| DocumentError::Malformed)?;
+            // Yrs retries held blocks only when a missing client's clock
+            // moves. An update that fills a gap Yrs already skipped over
+            // satisfies a held dependency without moving the clock, so the
+            // held blocks would stay stuck and replicas would diverge. Take
+            // them out and apply them once more; whatever still can't
+            // integrate goes back to being held.
+            let held = txn
+                .store_mut()
+                .pending_update_mut()
+                .map(|pending| std::mem::take(&mut pending.update))
+                .filter(|held| !held.is_empty());
+            if let Some(held) = held {
+                txn.apply_update(held)
+                    .map_err(|_| DocumentError::Malformed)?;
+            }
             txn.state_vector().get(&self.doc.client_id())
         };
         if own_clock > self.own_clock {
@@ -960,73 +975,6 @@ mod tests {
             f.open(),
             &["01 02 01 05 00 04 01 04 626f6479 01 42 01 05 00 04 01 04 626f6479 01 41 00"],
         );
-    }
-
-    #[test]
-    fn vendored_yrs_survives_crash_payloads_without_the_check() {
-        // These reach Yrs directly, bypassing `check_update`, to pin the
-        // patches in vendor/yrs: a block below a client's clock that doesn't
-        // fill a skip is dropped instead of overwriting a live block.
-        let f = Fixture::new();
-        let cases: [(u32, &str, &[&str]); 3] = [
-            (
-                1000,
-                "hello world",
-                &["02 01 e807 0f 04 01 04 626f6479 01 61 01 e807 02 00 03 00"],
-            ),
-            (
-                5,
-                "hello",
-                &["02 01 05 00 04 01 04 626f6479 01 42 01 05 00 04 01 04 626f6479 01 41 00"],
-            ),
-            (
-                9,
-                "hello",
-                &[
-                    "01 01 05 00 04 01 04 626f6479 01 78 00",
-                    "01 01 05 00 04 01 04 626f6479 00 00",
-                    "01 03 01 01 00 02 00 03 00 02 02 02 01 09 01 01 01 08 03",
-                    "02 02 01 00 00 02 00 04 04 02 01 00 02 00 04 00 02 00 03 01 01 01 0b 04",
-                ],
-            ),
-        ];
-        for (client, text, payloads) in cases {
-            let (doc, _) =
-                NoteDocument::create_with_client_id(f.vault, f.id, f.key(), text, T1, client)
-                    .unwrap();
-            for payload in payloads {
-                if let Ok(update) = Update::decode_v1(&hex(payload)) {
-                    let _ = doc.doc.transact_mut().apply_update(update);
-                }
-            }
-            // The document is still whole: its text is readable, survives a
-            // snapshot round trip, and its original text wasn't overwritten.
-            let text_now = body(&doc);
-            assert!(text_now.contains(text), "{text_now:?}");
-            let mut reloaded = f.open();
-            reloaded
-                .load_snapshot(doc.snapshot().unwrap().as_bytes())
-                .ok();
-        }
-    }
-
-    #[test]
-    fn legitimate_update_over_a_foreign_skip() {
-        // B holds GC blocks for client 1 from clock 1 (a
-        // skip at 0). A real edit from client 1 then arrives; Yrs splits its
-        // item at clock 1, drops the known half, and used to integrate the
-        // other half still pointing at it (a use-after-free under ASan).
-        let f = Fixture::new();
-        let mut b = NoteDocument::with_client_id(f.vault, f.id, f.key(), 2);
-        let crafted = hex("01 01 03 01 01 00 02 00 03 00 02 02 02 01 09 01 01 01 2f 2c");
-        b.apply_update(&f.raw_update(&crafted)).unwrap();
-        let mut a = NoteDocument::with_client_id(f.vault, f.id, f.key(), 1);
-        let update = a.set_body("\u{2}\u{2}", T2).unwrap().unwrap();
-        let _ = b.apply_update(update.as_bytes());
-        let mut reloaded = f.open();
-        reloaded
-            .load_snapshot(b.snapshot().unwrap().as_bytes())
-            .unwrap();
     }
 
     #[test]
