@@ -8,7 +8,9 @@ use std::fmt;
 use futures::channel::mpsc;
 
 use crate::crypto::{CryptoError, NoteKey, VaultId, VaultKey, fill_random};
-use crate::document::{DocumentError, EncryptedSnapshot, EncryptedUpdate, NoteDocument};
+use crate::document::{
+    DocumentError, EditorSync, EditorUpdate, EncryptedSnapshot, EncryptedUpdate, NoteDocument,
+};
 use crate::note::{Note, NoteId, Timestamp};
 use crate::protocol::{ChangesResponse, Entry};
 use crate::storage::{
@@ -23,6 +25,9 @@ pub enum ReplicaError {
     Document(DocumentError),
     Crypto(CryptoError),
     NoteNotFound(NoteId),
+    /// The editor session was never attached, was detached, or its note
+    /// was purged.
+    EditorSessionNotFound(EditorSessionId),
 }
 
 impl fmt::Display for ReplicaError {
@@ -32,6 +37,7 @@ impl fmt::Display for ReplicaError {
             Self::Document(err) => err.fmt(f),
             Self::Crypto(err) => err.fmt(f),
             Self::NoteNotFound(id) => write!(f, "note {id} not found"),
+            Self::EditorSessionNotFound(_) => f.write_str("editor session not found"),
         }
     }
 }
@@ -54,6 +60,17 @@ impl From<CryptoError> for ReplicaError {
     fn from(err: CryptoError) -> Self {
         Self::Crypto(err)
     }
+}
+
+/// One editor attached to a note, from [`Replica::editor_attach`]. IDs are
+/// never reused within a process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EditorSessionId(u64);
+
+/// An attached editor: its note and what it has seen.
+struct EditorSession {
+    note: NoteId,
+    sync: EditorSync,
 }
 
 /// One open note.
@@ -126,6 +143,10 @@ pub struct Replica<S: Storage> {
     /// Problems found at open, not yet reported.
     open_issues: Issues,
     wake: Option<mpsc::Sender<()>>,
+    /// Kept outside [`Open`] so they survive a document being rebuilt from
+    /// storage.
+    editors: BTreeMap<EditorSessionId, EditorSession>,
+    next_editor: u64,
 }
 
 impl<S: Storage> Replica<S> {
@@ -144,6 +165,8 @@ impl<S: Storage> Replica<S> {
             unopenable: BTreeSet::new(),
             open_issues: Issues::default(),
             wake: None,
+            editors: BTreeMap::new(),
+            next_editor: 0,
         };
         for id in storage.list_notes()? {
             if let Some(stored) = storage.load_note(id)? {
@@ -202,19 +225,80 @@ impl<S: Storage> Replica<S> {
 
     /// Sets note `id`'s body. Does nothing if it's unchanged.
     pub fn set_body(&mut self, id: NoteId, body: &str, now: Timestamp) -> Result<(), ReplicaError> {
-        self.edit(id, |doc| doc.set_body(body, now))
+        self.edit(id, |doc| doc.set_body(body, now)).map(drop)
     }
 
     pub fn set_pinned(&mut self, id: NoteId, pinned: bool) -> Result<(), ReplicaError> {
-        self.edit(id, |doc| doc.set_pinned(pinned))
+        self.edit(id, |doc| doc.set_pinned(pinned)).map(drop)
     }
 
     pub fn set_archived(&mut self, id: NoteId, archived: bool) -> Result<(), ReplicaError> {
-        self.edit(id, |doc| doc.set_archived(archived))
+        self.edit(id, |doc| doc.set_archived(archived)).map(drop)
     }
 
     pub fn set_trashed(&mut self, id: NoteId, trashed: bool) -> Result<(), ReplicaError> {
-        self.edit(id, |doc| doc.set_trashed(trashed))
+        self.edit(id, |doc| doc.set_trashed(trashed)).map(drop)
+    }
+
+    /// Attaches an editor to note `id`. Returns its session and the note's
+    /// full state for the editor's replica.
+    pub fn editor_attach(
+        &mut self,
+        id: NoteId,
+    ) -> Result<(EditorSessionId, EditorUpdate), ReplicaError> {
+        let open = self.notes.get(&id).ok_or(ReplicaError::NoteNotFound(id))?;
+        let (state, sync) = open.doc.editor_attach();
+        let session = EditorSessionId(self.next_editor);
+        self.next_editor += 1;
+        self.editors
+            .insert(session, EditorSession { note: id, sync });
+        Ok((session, state))
+    }
+
+    /// Applies an update made in `session`'s editor as a local edit, stored
+    /// and queued for push like [`set_body`](Self::set_body). Returns
+    /// whether it changed anything. On a storage failure the note is
+    /// rebuilt from storage and the call fails; the editor resends, which
+    /// is harmless if part of it was already applied.
+    pub fn apply_editor_update(
+        &mut self,
+        session: EditorSessionId,
+        update: &EditorUpdate,
+        now: Timestamp,
+    ) -> Result<bool, ReplicaError> {
+        let editor = self
+            .editors
+            .get(&session)
+            .ok_or(ReplicaError::EditorSessionNotFound(session))?;
+        let (note, mut sync) = (editor.note, editor.sync.clone());
+        let result = self.edit(note, |doc| doc.apply_editor_update(&mut sync, update, now));
+        if let Some(editor) = self.editors.get_mut(&session) {
+            editor.sync = sync;
+        }
+        result
+    }
+
+    /// Everything `session`'s editor lacks (remote updates, core-side
+    /// edits, updated-time bumps), or `None` if it has it all. Hosts call
+    /// this whenever the note changes.
+    pub fn editor_pending(
+        &mut self,
+        session: EditorSessionId,
+    ) -> Result<Option<EditorUpdate>, ReplicaError> {
+        let editor = self
+            .editors
+            .get_mut(&session)
+            .ok_or(ReplicaError::EditorSessionNotFound(session))?;
+        let open = self
+            .notes
+            .get(&editor.note)
+            .ok_or(ReplicaError::NoteNotFound(editor.note))?;
+        Ok(open.doc.editor_pending(&mut editor.sync))
+    }
+
+    /// Detaches `session`'s editor. Unknown sessions are ignored.
+    pub fn editor_detach(&mut self, session: EditorSessionId) {
+        self.editors.remove(&session);
     }
 
     /// The number of local updates not yet acknowledged by the server.
@@ -222,19 +306,22 @@ impl<S: Storage> Replica<S> {
         Ok(self.store()?.outbox()?.len())
     }
 
-    /// Applies a local change, then stores it. If storing fails, the
-    /// document is rebuilt from storage, since a document can't undo.
+    /// Applies a local change, then stores it. Returns whether there was
+    /// anything to store. If storing fails, the document is rebuilt from
+    /// storage, since a document can't undo. A malformed change is rejected
+    /// before it touches the document, so that needs no rebuild.
     fn edit(
         &mut self,
         id: NoteId,
         change: impl FnOnce(&mut NoteDocument) -> Result<Option<EncryptedUpdate>, DocumentError>,
-    ) -> Result<(), ReplicaError> {
+    ) -> Result<bool, ReplicaError> {
         let open = self
             .notes
             .get_mut(&id)
             .ok_or(ReplicaError::NoteNotFound(id))?;
         let stored = match change(&mut open.doc) {
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(false),
+            Err(DocumentError::Malformed) => return Err(DocumentError::Malformed.into()),
             Ok(Some(update)) => local_update(update)
                 .map_err(ReplicaError::from)
                 .and_then(|update| Ok(self.store_mut()?.append_local(id, update)?)),
@@ -246,7 +333,7 @@ impl<S: Storage> Replica<S> {
                     open.entries += 1;
                 }
                 self.poke();
-                Ok(())
+                Ok(true)
             }
             Err(err) => {
                 self.reload(id);
@@ -486,6 +573,7 @@ impl<S: Storage> Replica<S> {
     pub(crate) fn delete_note(&mut self, id: NoteId) -> Result<bool, StorageError> {
         self.store_mut()?.delete_note(id)?;
         self.unopenable.remove(&id);
+        self.editors.retain(|_, editor| editor.note != id);
         Ok(self.notes.remove(&id).is_some())
     }
 
@@ -1124,6 +1212,153 @@ mod tests {
         let applied = b.apply_page(&second).unwrap();
         assert_eq!(applied.changed, BTreeSet::from([id]));
         assert_eq!(b.note(id).unwrap().body(), "compacted note");
+    }
+
+    /// The editor's side of a session: a plain Yrs doc fed from the replica.
+    fn editor(state: &EditorUpdate) -> yrs::Doc {
+        use yrs::updates::decoder::Decode;
+        use yrs::{Options, Transact, Update};
+        let mut options = Options::with_client_id(yrs::ClientID::new(4242));
+        options.offset_kind = yrs::OffsetKind::Utf16;
+        let doc = yrs::Doc::with_options(options);
+        doc.get_or_insert_text("body");
+        let update = Update::decode_v1(state.as_bytes()).unwrap();
+        doc.transact_mut().apply_update(update).unwrap();
+        doc
+    }
+
+    fn type_text(doc: &yrs::Doc, text: &str) -> EditorUpdate {
+        use yrs::{Text, Transact};
+        let body = doc.get_or_insert_text("body");
+        let mut txn = doc.transact_mut();
+        let end = body.len(&txn);
+        body.insert(&mut txn, end, text);
+        EditorUpdate::from_bytes(txn.encode_update_v1())
+    }
+
+    fn editor_body(doc: &yrs::Doc, pending: &EditorUpdate) -> String {
+        use yrs::types::GetString;
+        use yrs::updates::decoder::Decode;
+        use yrs::{Transact, Update};
+        let update = Update::decode_v1(pending.as_bytes()).unwrap();
+        doc.transact_mut().apply_update(update).unwrap();
+        doc.get_or_insert_text("body").get_string(&doc.transact())
+    }
+
+    #[test]
+    fn editor_update_is_stored_and_queued_once() {
+        let (mut a, _) = pair();
+        let id = a.create_note("Hi", T1).unwrap();
+        let (session, state) = a.editor_attach(id).unwrap();
+        let doc = editor(&state);
+        let update = type_text(&doc, "!");
+        assert_eq!(a.apply_editor_update(session, &update, T2), Ok(true));
+        assert_eq!(a.note(id).unwrap().body(), "Hi!");
+        assert_eq!(a.note(id).unwrap().updated(), T2);
+        let stored = a.storage().unwrap().load_note(id).unwrap().unwrap();
+        assert_eq!(stored.entries.len(), 2);
+        assert_eq!(a.pending().unwrap(), 2);
+        assert_eq!(reopen(&a).note(id), a.note(id));
+
+        // The same update again changes nothing and stores nothing.
+        assert_eq!(a.apply_editor_update(session, &update, T2), Ok(false));
+        assert_eq!(a.pending().unwrap(), 2);
+        // The `updated` bump comes back to the editor.
+        assert!(a.editor_pending(session).unwrap().is_some());
+        assert_eq!(a.editor_pending(session), Ok(None));
+    }
+
+    #[test]
+    fn editor_update_after_a_storage_failure() {
+        let [key] = vault_keys(vault());
+        let store = Failing {
+            inner: MemoryStorage::new(vault()),
+            fail: false,
+        };
+        let mut r = Replica::open(store, key).unwrap();
+        let id = r.create_note("Hi", T1).unwrap();
+        let (session, state) = r.editor_attach(id).unwrap();
+        let doc = editor(&state);
+        let update = type_text(&doc, "!");
+
+        r.storage_mut().unwrap().fail = true;
+        let err = r.apply_editor_update(session, &update, T2).unwrap_err();
+        assert!(matches!(err, ReplicaError::Storage(_)));
+        // Memory matches storage again.
+        assert_eq!(r.note(id).unwrap().body(), "Hi");
+        assert_eq!(r.pending().unwrap(), 1);
+
+        // The editor resends, and it lands.
+        assert_eq!(r.apply_editor_update(session, &update, T2), Ok(true));
+        assert_eq!(r.note(id).unwrap().body(), "Hi!");
+        assert_eq!(r.pending().unwrap(), 2);
+    }
+
+    #[test]
+    fn remote_batch_reaches_the_editor() {
+        let (mut a, mut b) = pair();
+        let id = a.create_note("one\ntwo", T1).unwrap();
+        b.apply_page(&page_of_outbox(&a, 1)).unwrap();
+        let (session, state) = b.editor_attach(id).unwrap();
+        let doc = editor(&state);
+        assert_eq!(b.editor_pending(session), Ok(None));
+
+        a.apply_page(&page_of_outbox(&a, 1)).unwrap();
+        a.set_body(id, "one\nTWO", T2).unwrap();
+        b.apply_page(&page_of_outbox(&a, 2)).unwrap();
+        let pending = b.editor_pending(session).unwrap().unwrap();
+        assert_eq!(editor_body(&doc, &pending), "one\nTWO");
+    }
+
+    #[test]
+    fn garbage_from_the_editor() {
+        let (mut a, _) = pair();
+        let id = a.create_note("x", T1).unwrap();
+        let (session, _) = a.editor_attach(id).unwrap();
+        let garbage = EditorUpdate::from_bytes(vec![0xff; 8]);
+        assert_eq!(
+            a.apply_editor_update(session, &garbage, T2),
+            Err(ReplicaError::Document(DocumentError::Malformed))
+        );
+        assert_eq!(a.note(id).unwrap().body(), "x");
+        assert_eq!(a.pending().unwrap(), 1);
+    }
+
+    #[test]
+    fn editor_sessions_that_are_gone() {
+        let (mut a, _) = pair();
+        let id = a.create_note("x", T1).unwrap();
+        let missing = NoteId::from_parts(9, 9);
+        assert_eq!(
+            a.editor_attach(missing).map(drop),
+            Err(ReplicaError::NoteNotFound(missing))
+        );
+
+        let (first, state) = a.editor_attach(id).unwrap();
+        let (second, _) = a.editor_attach(id).unwrap();
+        assert_ne!(first, second);
+        let update = type_text(&editor(&state), "y");
+        a.editor_detach(first);
+        assert_eq!(
+            a.apply_editor_update(first, &update, T2),
+            Err(ReplicaError::EditorSessionNotFound(first))
+        );
+        assert_eq!(
+            a.editor_pending(first),
+            Err(ReplicaError::EditorSessionNotFound(first))
+        );
+
+        a.delete_note(id).unwrap();
+        assert_eq!(
+            a.apply_editor_update(second, &update, T2),
+            Err(ReplicaError::EditorSessionNotFound(second))
+        );
+        assert_eq!(
+            a.editor_pending(second),
+            Err(ReplicaError::EditorSessionNotFound(second))
+        );
+        // Detaching twice is harmless.
+        a.editor_detach(second);
     }
 
     #[test]

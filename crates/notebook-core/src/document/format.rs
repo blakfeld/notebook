@@ -76,6 +76,35 @@ impl EncryptedSnapshot {
     }
 }
 
+/// A plaintext Yjs v1 update exchanged with the open editor on this device.
+///
+/// It has no format byte, because it is never stored: the core and the
+/// editor ship together. It can't be converted to or from the encrypted
+/// types, so it can't reach storage or sync by accident, and its `Debug`
+/// output hides the note text it carries.
+#[derive(Clone, PartialEq, Eq)]
+pub struct EditorUpdate(Zeroizing<Vec<u8>>);
+
+impl EditorUpdate {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        std::mem::take(&mut *self.0)
+    }
+}
+
+impl fmt::Debug for EditorUpdate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "EditorUpdate({} bytes)", self.0.len())
+    }
+}
+
 /// Prefixes a format-1 payload with its format byte.
 pub(crate) fn encode_plaintext(payload: &[u8]) -> Zeroizing<Vec<u8>> {
     let mut plaintext = Zeroizing::new(Vec::with_capacity(payload.len() + 1));

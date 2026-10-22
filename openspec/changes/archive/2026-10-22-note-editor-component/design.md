@@ -167,7 +167,11 @@ Consistency with the Rust parser is enforced by a fixture: `crates/notebook-core
 
 ### CSP
 
-CodeMirror injects its styles through `style-mod`, which uses constructable stylesheets (`adoptedStyleSheets`) where available; CSP `style-src` doesn't govern those. As a fallback `EditorView.cspNonce` exists, but the server doesn't issue nonces, so we rely on constructable stylesheets (supported by all browsers we target). Inline `style=""` attributes that CodeMirror sets through `setAttribute` (for example `tab-size` on the content element) are blocked under `style-src 'self'`; they're cosmetic. A task verifies the editor in a production build under the server's CSP and records any blocked attributes; if one matters, the editor sets it from `web/src/editor/editor.css` instead.
+CodeMirror injects its styles through `style-mod`. On a document root it adds `<style>` elements, which `style-src 'self'` blocks; it uses constructable stylesheets (`adoptedStyleSheets`), which CSP `style-src` doesn't govern, only when the root is a shadow root. So `createNoteEditor` mounts the view in an open shadow root on a `.note-editor-host` element it adds to `parent`, passing that root as the view's `root`. Page CSS can size the host but can't reach `.cm-*` elements inside it; editor styling goes through `EditorView.theme` and `baseTheme`, which `editor-live-preview` uses anyway. Inherited properties (font, color) and CSS custom properties still cross the boundary.
+
+**Alternatives considered:** `EditorView.cspNonce` needs a per-request nonce, and the server serves the index page as a static file. Adding `'unsafe-inline'` to the server's `style-src` weakens the policy for the whole app. Both rejected.
+
+Inline `style=""` attributes that CodeMirror sets through `setAttribute` (for example `tab-size` on the content element) are blocked under `style-src 'self'`; they're cosmetic. A task verifies the editor in a production build under the server's CSP and records any blocked attributes; if one matters, the editor sets it through a theme instead.
 
 ### Dependencies
 

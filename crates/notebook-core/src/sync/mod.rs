@@ -67,7 +67,7 @@ use std::time::Duration;
 use futures::channel::{mpsc, oneshot};
 
 pub use engine::SyncEngine;
-pub use replica::{Replica, ReplicaError};
+pub use replica::{EditorSessionId, Replica, ReplicaError};
 pub use session::{AccessToken, RefreshError, SessionSource};
 pub use timer::Timer;
 pub use transport::{LiveChannel, LiveEvent, Transport, TransportError};

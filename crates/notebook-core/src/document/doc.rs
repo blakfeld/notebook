@@ -6,14 +6,14 @@ use dissimilar::Chunk;
 use yrs::types::GetString;
 use yrs::updates::decoder::Decode;
 use yrs::{
-    Any, ClientID, Doc, Map, MapRef, Number, OffsetKind, Options, Out, ReadTxn, StateVector, Text,
-    TextRef, Transact, TransactionMut, Update, WriteTxn,
+    Any, ClientID, Doc, Map, MapRef, Number, OffsetKind, Options, Out, ReadTxn, Snapshot,
+    StateVector, Text, TextRef, Transact, TransactionMut, Update, WriteTxn,
 };
 use zeroize::Zeroizing;
 
 use super::format::{
-    DocumentError, EncryptedSnapshot, EncryptedUpdate, decode_plaintext, decrypt, encrypt_snapshot,
-    encrypt_update,
+    DocumentError, EditorUpdate, EncryptedSnapshot, EncryptedUpdate, decode_plaintext, decrypt,
+    encrypt_snapshot, encrypt_update,
 };
 use super::validate::{MAX_PLAINTEXT_LEN, check_update};
 use crate::crypto::{ENVELOPE_OVERHEAD, NoteKey, PayloadKind, VaultId, fill_random};
@@ -44,6 +44,20 @@ pub struct NoteDocument {
     /// The clock this instance has reached under its own client ID. More
     /// than this under our ID means another replica drew the same ID.
     own_clock: u32,
+}
+
+/// What a [`NoteDocument`] believes one attached editor replica already
+/// has: the inserts and the deletions it has seen. Each attached editor has
+/// its own.
+#[derive(Clone)]
+pub struct EditorSync {
+    seen: Snapshot,
+}
+
+impl fmt::Debug for EditorSync {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EditorSync").finish_non_exhaustive()
+    }
 }
 
 impl NoteDocument {
@@ -223,6 +237,71 @@ impl NoteDocument {
         self.encrypt_update(&self.full_state())
     }
 
+    /// The full current state for a new editor replica, and the tracker for
+    /// what that replica has.
+    pub fn editor_attach(&self) -> (EditorUpdate, EditorSync) {
+        let txn = self.doc.transact();
+        let state = txn.encode_state_as_update_v1(&StateVector::default());
+        let seen = txn.snapshot();
+        (EditorUpdate::from_bytes(state), EditorSync { seen })
+    }
+
+    /// Applies an update made in the editor tracked by `sync`, as a local
+    /// edit. If the body changed, the updated time becomes `now`. Returns
+    /// the encrypted update carrying the whole change for storage and sync,
+    /// or `None` if the update changed nothing. On error the document is
+    /// unchanged.
+    pub fn apply_editor_update(
+        &mut self,
+        sync: &mut EditorSync,
+        update: &EditorUpdate,
+        now: Timestamp,
+    ) -> Result<Option<EncryptedUpdate>, DocumentError> {
+        // The editor runs in a webview, so its bytes get the same check as
+        // decrypted remote data.
+        let payload = update.as_bytes();
+        check_update(payload).map_err(|_| DocumentError::Malformed)?;
+        let decoded = Update::decode_v1(payload).map_err(|_| DocumentError::Malformed)?;
+        let (editor_sv, editor_deletes) = (decoded.state_vector(), decoded.delete_set().clone());
+
+        let (before, body_before) = {
+            let txn = self.doc.transact();
+            (txn.snapshot(), Zeroizing::new(self.body.get_string(&txn)))
+        };
+        self.integrate(decoded)?;
+        let body_changed = *body_before != self.body.get_string(&self.doc.transact());
+        if body_changed {
+            self.local_edit(|doc, txn| {
+                doc.meta.insert(txn, META_UPDATED, timestamp(now));
+            });
+        }
+        sync.seen.state_map.merge(editor_sv);
+        sync.seen.delete_set.merge_with(editor_deletes);
+
+        let txn = self.doc.transact();
+        if !has_new(&before, &txn.snapshot()) {
+            return Ok(None);
+        }
+        let diff = Zeroizing::new(txn.encode_state_as_update_v1(&before.state_map));
+        drop(txn);
+        self.encrypt_update(&diff).map(Some)
+    }
+
+    /// Everything the editor tracked by `sync` lacks (remote updates,
+    /// core-side edits, updated-time bumps), or `None` if it has it all.
+    /// The tracker then counts it as delivered.
+    pub fn editor_pending(&self, sync: &mut EditorSync) -> Option<EditorUpdate> {
+        let txn = self.doc.transact();
+        let current = txn.snapshot();
+        if !has_new(&sync.seen, &current) {
+            return None;
+        }
+        let diff = txn.encode_state_as_update_v1(&sync.seen.state_map);
+        sync.seen.state_map.merge(current.state_map);
+        sync.seen.delete_set.merge_with(current.delete_set);
+        Some(EditorUpdate::from_bytes(diff))
+    }
+
     fn set_flag(
         &mut self,
         key: &str,
@@ -269,6 +348,12 @@ impl NoteDocument {
         // explicit-ID parent that isn't a type, which the check rejects).
         check_update(payload).map_err(|_| DocumentError::Malformed)?;
         let update = Update::decode_v1(payload).map_err(|_| DocumentError::Malformed)?;
+        self.integrate(update)
+    }
+
+    /// Applies a checked and decoded update, retrying held blocks, and
+    /// rotates the client ID if the update writes under ours.
+    fn integrate(&mut self, update: Update) -> Result<(), DocumentError> {
         let spare_client_id = random_client_id()?;
         let own_clock = {
             let mut txn = self.doc.transact_mut();
@@ -369,6 +454,15 @@ fn read_timestamp(value: Option<Out>) -> Option<Timestamp> {
         }
         _ => None,
     }
+}
+
+/// Whether `after` has inserts or deletions that `before` doesn't.
+fn has_new(before: &Snapshot, after: &Snapshot) -> bool {
+    let inserts = after
+        .state_map
+        .iter()
+        .any(|(client, &clock)| clock > before.state_map.get(client));
+    inserts || !after.delete_set.diff(&before.delete_set).is_empty()
 }
 
 fn utf16_len(text: &str) -> u32 {
@@ -1580,6 +1674,312 @@ mod tests {
         assert!(contains(&f.plaintext(&edit)));
         for ciphertext in [created.as_bytes(), edit.as_bytes(), snapshot.as_bytes()] {
             assert!(!contains(ciphertext));
+        }
+    }
+
+    // Editor exchange
+
+    /// A Yjs-style replica standing in for the editor in the webview.
+    struct Editor {
+        doc: Doc,
+        body: TextRef,
+        meta: MapRef,
+    }
+
+    impl Editor {
+        fn start(state: &EditorUpdate, client_id: u32) -> Self {
+            let (doc, body, meta) = new_doc(client_id);
+            let editor = Self { doc, body, meta };
+            editor.apply(state);
+            editor
+        }
+
+        fn apply(&self, update: &EditorUpdate) {
+            let update = Update::decode_v1(update.as_bytes()).unwrap();
+            self.doc.transact_mut().apply_update(update).unwrap();
+        }
+
+        /// Makes one edit and returns its update, as the binding would.
+        fn edit(&self, edit: impl FnOnce(&TextRef, &mut TransactionMut<'_>)) -> EditorUpdate {
+            let mut txn = self.doc.transact_mut();
+            edit(&self.body, &mut txn);
+            EditorUpdate::from_bytes(txn.encode_update_v1())
+        }
+
+        fn append(&self, text: &str) -> EditorUpdate {
+            self.edit(|body, txn| {
+                let end = body.len(txn);
+                body.insert(txn, end, text);
+            })
+        }
+
+        fn body(&self) -> String {
+            self.body.get_string(&self.doc.transact())
+        }
+
+        fn updated(&self) -> Option<Timestamp> {
+            read_timestamp(self.meta.get(&self.doc.transact(), META_UPDATED))
+        }
+
+        fn state_vector(&self) -> StateVector {
+            self.doc.transact().state_vector()
+        }
+    }
+
+    const EDITOR_ID: u32 = 4242;
+
+    fn attach(doc: &NoteDocument) -> (Editor, EditorSync) {
+        let (state, sync) = doc.editor_attach();
+        (Editor::start(&state, EDITOR_ID), sync)
+    }
+
+    #[test]
+    fn editor_starts_from_the_full_state() {
+        let f = Fixture::new();
+        let (mut doc, _) = f.create("# Groceries\n- eggs");
+        doc.set_pinned(true).unwrap().unwrap();
+        let (editor, _) = attach(&doc);
+        assert_eq!(editor.body(), "# Groceries\n- eggs");
+        assert_eq!(editor.updated(), Some(T1));
+        assert_eq!(editor.state_vector(), doc.doc.transact().state_vector());
+    }
+
+    #[test]
+    fn typed_text_is_encrypted_for_sync() {
+        let f = Fixture::new();
+        let (mut doc, u0) = f.create("Hi");
+        let (editor, mut sync) = attach(&doc);
+        let update = editor.append("!");
+        let encrypted = doc
+            .apply_editor_update(&mut sync, &update, T2)
+            .unwrap()
+            .unwrap();
+        let note = doc.note().unwrap();
+        assert_eq!(note.body(), "Hi!");
+        assert_eq!(note.updated(), T2);
+        let copy = f.replica(&[&u0, &encrypted]);
+        assert_eq!(copy.note(), doc.note());
+        assert_same(&copy, &doc);
+    }
+
+    #[test]
+    fn duplicate_editor_update() {
+        let f = Fixture::new();
+        let (mut doc, _) = f.create("Hi");
+        let (editor, mut sync) = attach(&doc);
+        let update = editor.append("!");
+        doc.apply_editor_update(&mut sync, &update, T2)
+            .unwrap()
+            .unwrap();
+        let before = state(&doc);
+        let later = Timestamp(T2.0 + 1);
+        assert_eq!(doc.apply_editor_update(&mut sync, &update, later), Ok(None));
+        assert_eq!(state(&doc), before);
+    }
+
+    #[test]
+    fn deletion_from_the_editor_is_a_change() {
+        // A pure deletion moves no clock, only the delete set.
+        let f = Fixture::new();
+        let (mut doc, u0) = f.create("Hello world");
+        let (editor, mut sync) = attach(&doc);
+        let update = editor.edit(|body, txn| body.remove_range(txn, 5, 6));
+        let encrypted = doc
+            .apply_editor_update(&mut sync, &update, T2)
+            .unwrap()
+            .unwrap();
+        assert_eq!(body(&doc), "Hello");
+        assert_eq!(body(&f.replica(&[&u0, &encrypted])), "Hello");
+        assert_eq!(doc.apply_editor_update(&mut sync, &update, T2), Ok(None));
+    }
+
+    #[test]
+    fn garbage_editor_update() {
+        let f = Fixture::new();
+        let (mut doc, _) = f.create("abc");
+        let (_, mut sync) = attach(&doc);
+        let before = state(&doc);
+        let mut rng = Rng(0xdead_beef_cafe_f00d);
+        let mut cases = vec![
+            Vec::new(),
+            vec![0xff, 0xff, 0xff],
+            hex("01 01 42 00 04 01 03 666f6f 01 7a 00"),
+            vec![0; MAX_PLAINTEXT_LEN + 1],
+        ];
+        cases.extend((0..500).map(|_| {
+            let len = rng.below(48);
+            rng.bytes(len)
+        }));
+        for garbage in cases {
+            let update = EditorUpdate::from_bytes(garbage);
+            let result = doc.apply_editor_update(&mut sync, &update, T2);
+            // Random bytes can happen to be a valid empty update.
+            assert!(
+                matches!(result, Err(DocumentError::Malformed) | Ok(None)),
+                "{result:?}"
+            );
+            assert_eq!(state(&doc), before);
+        }
+        let result = doc.apply_editor_update(&mut sync, &EditorUpdate::from_bytes(vec![]), T2);
+        assert_eq!(result, Err(DocumentError::Malformed));
+        assert_eq!(doc.editor_pending(&mut sync), None);
+    }
+
+    #[test]
+    fn remote_change_reaches_the_editor() {
+        let f = Fixture::new();
+        let (mut doc, u0) = f.create("one\ntwo");
+        let (editor, mut sync) = attach(&doc);
+        let mut other = f.replica(&[&u0]);
+        let remote = other.set_body("one\nTWO", T2).unwrap().unwrap();
+        doc.apply_update(remote.as_bytes()).unwrap();
+        editor.apply(&doc.editor_pending(&mut sync).unwrap());
+        assert_eq!(editor.body(), "one\nTWO");
+
+        // A remote pure deletion reaches it too.
+        let remote = other.set_body("one", T2).unwrap().unwrap();
+        doc.apply_update(remote.as_bytes()).unwrap();
+        editor.apply(&doc.editor_pending(&mut sync).unwrap());
+        assert_eq!(editor.body(), "one");
+    }
+
+    #[test]
+    fn nothing_new_for_the_editor() {
+        let f = Fixture::new();
+        let (mut doc, _) = f.create("x");
+        let (_, mut sync) = attach(&doc);
+        assert_eq!(doc.editor_pending(&mut sync), None);
+        doc.set_body("xy", T2).unwrap().unwrap();
+        assert!(doc.editor_pending(&mut sync).is_some());
+        assert_eq!(doc.editor_pending(&mut sync), None);
+    }
+
+    #[test]
+    fn updated_time_reaches_the_editor() {
+        let f = Fixture::new();
+        let (mut doc, _) = f.create("Hi");
+        let (editor, mut sync) = attach(&doc);
+        doc.apply_editor_update(&mut sync, &editor.append("!"), T2)
+            .unwrap()
+            .unwrap();
+        let pending = doc.editor_pending(&mut sync).unwrap();
+        editor.apply(&pending);
+        assert_eq!(editor.updated(), Some(T2));
+        assert_eq!(editor.body(), body(&doc));
+        assert_eq!(editor.state_vector(), doc.doc.transact().state_vector());
+        assert_eq!(doc.editor_pending(&mut sync), None);
+    }
+
+    #[test]
+    fn editor_debug_output_is_redacted() {
+        let update = EditorUpdate::from_bytes(b"secret marker".to_vec());
+        assert!(!format!("{update:?}").contains("secret"));
+        let f = Fixture::new();
+        let (doc, _) = f.create("secret marker");
+        let (state, sync) = doc.editor_attach();
+        assert!(!format!("{state:?} {sync:?}").contains("secret"));
+        assert_eq!(update.clone().into_bytes(), update.as_bytes());
+    }
+
+    /// The UTF-16 offset of the `chars`-th char of `text`.
+    fn utf16_offset(text: &str, chars: usize) -> u32 {
+        text.chars().take(chars).map(|c| c.len_utf16() as u32).sum()
+    }
+
+    #[test]
+    fn editor_and_replicas_converge() {
+        let f = Fixture::new();
+        for seed in 0..200u64 {
+            let mut rng = Rng((0x0bad_5eed ^ seed.wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1);
+            let (mut core, u0) = f.create("one two three");
+            let (state, mut sync) = core.editor_attach();
+            let editor = Editor::start(&state, 1 + rng.below(1 << 20) as u32);
+            let mut other = f.replica(&[&u0]);
+            // In flight: editor to core, core to other, other to core.
+            let mut to_core: Vec<EditorUpdate> = Vec::new();
+            let mut to_other: Vec<EncryptedUpdate> = Vec::new();
+            let mut from_other: Vec<EncryptedUpdate> = Vec::new();
+            let mut clock = T2.0;
+            let mut push = |core: &mut NoteDocument,
+                            sync: &mut EditorSync,
+                            to_core: &mut Vec<EditorUpdate>,
+                            to_other: &mut Vec<EncryptedUpdate>| {
+                for update in to_core.drain(..) {
+                    clock += 1;
+                    let now = Timestamp(clock);
+                    if let Some(u) = core.apply_editor_update(sync, &update, now).unwrap() {
+                        to_other.push(u);
+                    }
+                }
+            };
+            for step in 0..24 {
+                match rng.below(7) {
+                    0 | 1 => {
+                        let text = editor.body();
+                        let chars = text.chars().count();
+                        let update = if chars > 0 && rng.below(3) == 0 {
+                            let start = rng.below(chars);
+                            let len = 1 + rng.below((chars - start).min(4));
+                            let from = utf16_offset(&text, start);
+                            let to = utf16_offset(&text, start + len);
+                            editor.edit(|body, txn| body.remove_range(txn, from, to - from))
+                        } else {
+                            let at = utf16_offset(&text, rng.below(chars + 1));
+                            let piece = rng.text();
+                            editor.edit(|body, txn| body.insert(txn, at, &piece))
+                        };
+                        to_core.push(update);
+                    }
+                    // The editor delivers what it has, in order.
+                    2 => push(&mut core, &mut sync, &mut to_core, &mut to_other),
+                    3 => {
+                        if let Some(update) = core.editor_pending(&mut sync) {
+                            editor.apply(&update);
+                        }
+                    }
+                    4 => {
+                        let text = format!("{}{}", rng.text(), body(&other));
+                        let now = Timestamp(T2.0 + 1000 + step);
+                        if let Some(u) = other.set_body(&text, now).unwrap() {
+                            from_other.push(u);
+                        }
+                        if rng.below(3) == 0
+                            && let Some(u) = other.set_pinned(rng.below(2) == 0).unwrap()
+                        {
+                            from_other.push(u);
+                        }
+                    }
+                    5 => {
+                        for u in from_other.drain(..) {
+                            core.apply_update(u.as_bytes()).unwrap();
+                        }
+                    }
+                    _ => {
+                        for u in to_other.drain(..) {
+                            other.apply_update(u.as_bytes()).unwrap();
+                        }
+                    }
+                }
+            }
+            push(&mut core, &mut sync, &mut to_core, &mut to_other);
+            for u in from_other.drain(..) {
+                core.apply_update(u.as_bytes()).unwrap();
+            }
+            for u in to_other.drain(..) {
+                other.apply_update(u.as_bytes()).unwrap();
+            }
+            if let Some(update) = core.editor_pending(&mut sync) {
+                editor.apply(&update);
+            }
+            assert_same(&core, &other);
+            assert_eq!(editor.body(), body(&core), "seed {seed}");
+            assert_eq!(editor.updated(), Some(core.note().unwrap().updated()));
+            assert_eq!(
+                editor.doc.transact().snapshot(),
+                core.doc.transact().snapshot(),
+                "seed {seed}"
+            );
+            assert_eq!(core.editor_pending(&mut sync), None);
         }
     }
 
