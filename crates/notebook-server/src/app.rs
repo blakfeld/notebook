@@ -17,6 +17,7 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
+use crate::auth::{self, AuthState, RegistrationPolicy, Setup};
 use crate::config::Config;
 use crate::rate_limit::KeyedLimiter;
 use crate::{client_ip, db, rate_limit, security, static_files};
@@ -37,10 +38,13 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// The global per-client limiter applied to every request.
     pub limiter: Arc<KeyedLimiter>,
+    pub auth: Arc<AuthState>,
 }
 
 impl AppState {
-    pub fn new(pool: SqlitePool, config: Config) -> Self {
+    /// `setup` is the OPAQUE server key, normally from
+    /// [`auth::keyfile::load_or_create`]. HTTP registration is closed.
+    pub fn new(pool: SqlitePool, config: Config, setup: Setup) -> Self {
         let limiter = Arc::new(KeyedLimiter::new(
             config.rate_limit_per_second,
             config.rate_limit_burst,
@@ -49,6 +53,7 @@ impl AppState {
             pool,
             config: Arc::new(config),
             limiter,
+            auth: Arc::new(AuthState::new(setup, RegistrationPolicy::Closed)),
         }
     }
 }
@@ -57,6 +62,7 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     let routes = Router::new()
         .route("/healthz", get(healthz))
+        .merge(auth::routes(&state))
         .with_state(state.clone())
         .fallback_service(static_files::router(state.config.static_dir.as_deref()));
     harden(routes, &state)
@@ -131,6 +137,7 @@ async fn healthz(State(state): State<AppState>) -> StatusCode {
 pub async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let pool = db::connect(&config.database_path).await?;
     db::migrate(&pool).await?;
+    let setup = auth::keyfile::load_or_create(&pool, &config.opaque_key_path).await?;
 
     if config.trusted_proxies.is_empty() && config.bind.ip().is_loopback() {
         tracing::warn!(
@@ -146,8 +153,9 @@ pub async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
         listener.local_addr()?
     );
 
-    let state = AppState::new(pool.clone(), config);
+    let state = AppState::new(pool.clone(), config, setup);
     let _retain = rate_limit::spawn_retain_task(&state.limiter);
+    let _auth_tasks = state.auth.spawn_tasks(&pool);
     let result = run(listener, router(state), shutdown_signal()).await;
     // Connection tasks outlive `run` after the grace period and may still hold
     // pool connections, which `close` waits for; don't let them block exit.
@@ -243,7 +251,7 @@ mod tests {
         .unwrap();
         let dir = tempfile::tempdir().unwrap();
         let pool = db::connect(&dir.path().join("db")).await.unwrap();
-        let state = AppState::new(pool, config);
+        let state = AppState::new(pool, config, auth::keyfile::generate());
         let routes = Router::new().route(
             "/x",
             post(|body: Bytes| async move { body.len().to_string() }),

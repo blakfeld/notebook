@@ -105,6 +105,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accounts_tables_exist_and_usernames_are_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = connect(&dir.path().join("db")).await.unwrap();
+        migrate(&pool).await.unwrap();
+        for table in ["users", "vaults", "key_bundles", "sessions", "server_meta"] {
+            let n: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(n, 1, "{table}");
+        }
+        let insert = |id: u8| {
+            sqlx::query(
+                "INSERT INTO users (user_id, username, opaque_record, recovery_verifier_hash, \
+                 created_at, updated_at) VALUES (?, 'alice', x'00', x'00', 0, 0)",
+            )
+            .bind(vec![id; 16])
+            .execute(&pool)
+        };
+        insert(1).await.unwrap();
+        let err = insert(2).await.unwrap_err();
+        assert!(err.to_string().contains("UNIQUE"), "{err}");
+    }
+
+    #[tokio::test]
     async fn refuses_newer_schema() {
         let dir = tempfile::tempdir().unwrap();
         let pool = connect(&dir.path().join("db")).await.unwrap();

@@ -267,7 +267,7 @@ The server SHALL store access tokens, refresh tokens, and recovery verifiers onl
 - **THEN** none of them appears in the file
 
 ### Requirement: Auth errors are uniform JSON
-Every error returned by an `/auth` endpoint handler (as opposed to the shared rate-limit, size, and timeout layers) SHALL be a JSON object with a single `error` field holding a snake_case code (`invalid_request`, `invalid_username`, `invalid_credentials`, `invalid_token`, `session_ended`, `username_taken`), and SHALL NOT include internal details.
+Every error returned by an `/auth` endpoint handler (as opposed to the shared rate-limit, size, and timeout layers) SHALL be a JSON object with a single `error` field holding a snake_case code (`invalid_request`, `invalid_username`, `invalid_credentials`, `invalid_token`, `session_ended`, `username_taken`, `registration_closed`, `not_found`, `unavailable`, `internal`), and SHALL NOT include internal details.
 
 #### Scenario: Error body
 - **WHEN** a login finish fails because of a wrong passphrase

@@ -8,7 +8,7 @@ use axum::Router;
 use axum::routing::get;
 use notebook_server::app::{self, AppState};
 use notebook_server::config::Config;
-use notebook_server::db;
+use notebook_server::{auth, db};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, oneshot};
@@ -22,7 +22,7 @@ async fn in_flight_request_completes_after_shutdown_signal() {
     let dir = tempfile::tempdir().unwrap();
     let pool = db::connect(&dir.path().join("db")).await.unwrap();
     db::migrate(&pool).await.unwrap();
-    let state = AppState::new(pool, config);
+    let state = AppState::new(pool, config, auth::keyfile::generate());
 
     let started = Arc::new(Notify::new());
     let notify = started.clone();

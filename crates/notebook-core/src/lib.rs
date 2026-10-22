@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod crypto;
 pub mod document;
 pub mod note;

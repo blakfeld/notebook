@@ -110,6 +110,14 @@ impl KeyBundle {
         Ok(())
     }
 
+    /// True when `other` carries a byte-identical recovery entry, compared in
+    /// constant time. The server uses it to refuse a replacement bundle that
+    /// would change how (or whether) the recovery key unlocks the vault.
+    pub fn same_recovery_entry(&self, other: &KeyBundle) -> bool {
+        let (a, b) = (&self.recovery_entry, &other.recovery_entry);
+        a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    }
+
     /// Serializes the bundle for storage.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out =
@@ -450,6 +458,39 @@ mod tests {
         assert_same_vault_key(&f, &f.bundle.unlock_with_auth(&new_auth).unwrap());
         assert_same_vault_key(&f, &f.bundle.unlock_with_recovery(&f.recovery).unwrap());
         assert!(f.bundle.unlock_with_auth(&f.auth).is_err());
+    }
+
+    #[test]
+    fn recovery_entry_survives_rewrapping() {
+        let f = fixture();
+        let new_auth = AuthSecret::from_bytes(&[9; 64]).unwrap();
+
+        let mut changed = f.bundle.clone();
+        changed.change_auth(&f.auth, &new_auth).unwrap();
+        assert!(changed.same_recovery_entry(&f.bundle));
+
+        let mut recovered = f.bundle.clone();
+        recovered.recover_auth(&f.recovery, &new_auth).unwrap();
+        assert!(recovered.same_recovery_entry(&f.bundle));
+    }
+
+    #[test]
+    fn different_recovery_key_is_a_different_entry() {
+        let f = fixture();
+        let other = KeyBundle::create(
+            f.vault,
+            &f.vault_key,
+            &f.auth,
+            &RecoveryKey::generate().unwrap(),
+        )
+        .unwrap();
+        assert!(!other.same_recovery_entry(&f.bundle));
+
+        let truncated = KeyBundle {
+            recovery_entry: f.bundle.recovery_entry[..10].to_vec(),
+            ..f.bundle.clone()
+        };
+        assert!(!truncated.same_recovery_entry(&f.bundle));
     }
 
     #[test]

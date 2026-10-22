@@ -36,10 +36,12 @@ impl KdfVersion {
     }
 
     fn params(self) -> Params {
+        self.params_with_output(Some(OUTPUT_LEN))
+    }
+
+    fn params_with_output(self, output_len: Option<usize>) -> Params {
         match self {
-            Self::V1 => {
-                Params::new(64 * 1024, 3, 1, Some(OUTPUT_LEN)).expect("V1 parameters are valid")
-            }
+            Self::V1 => Params::new(64 * 1024, 3, 1, output_len).expect("V1 parameters are valid"),
         }
     }
 }
@@ -81,6 +83,20 @@ pub fn derive_auth_secret(
         .hash_password_into(passphrase, &salt.0, &mut *out)
         .map_err(|_| CryptoError::Kdf)?;
     AuthSecret::from_bytes(&*out)
+}
+
+/// Stretches `input` into `out` (any length Argon2 allows) with the
+/// [`KdfVersion::CURRENT`] parameters and an all-zero salt. This is the OPAQUE
+/// key-stretching step: its input is already a unique, per-user OPRF output,
+/// so a salt adds nothing.
+pub(crate) fn stretch(input: &[u8], out: &mut [u8]) -> Result<(), CryptoError> {
+    Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        KdfVersion::CURRENT.params_with_output(None),
+    )
+    .hash_password_into(input, &[0; SALT_LEN], out)
+    .map_err(|_| CryptoError::Kdf)
 }
 
 #[cfg(test)]
@@ -145,6 +161,25 @@ mod tests {
         let v = KdfVersion::CURRENT;
         assert_eq!(KdfVersion::from_u8(v.to_u8()), Ok(v));
         assert_eq!(v.params().output_len(), Some(OUTPUT_LEN));
+    }
+
+    #[test]
+    fn stretch_supports_64_byte_output_and_matches_derivation_at_32() {
+        let mut long = [0u8; 64];
+        stretch(b"input", &mut long).unwrap();
+        assert_ne!(long, [0; 64]);
+
+        // With a 32-byte output and a zero salt, stretching is the same
+        // Argon2id computation as `derive_auth_secret`.
+        let mut short = [0u8; 32];
+        stretch(b"input", &mut short).unwrap();
+        let derived = derive_auth_secret(b"input", &Salt([0; SALT_LEN]), KdfVersion::V1).unwrap();
+        let expected = AuthSecret::from_bytes(&short).unwrap();
+        let vault = VaultId::from_parts(0, 0);
+        assert_eq!(
+            derived.wrapping_key(vault).as_bytes(),
+            expected.wrapping_key(vault).as_bytes()
+        );
     }
 
     #[test]

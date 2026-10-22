@@ -5,9 +5,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use notebook_server::cli::{Cli, Command};
+use notebook_server::cli::{Cli, Command, UserCommand};
 use notebook_server::config::{Config, LogFormat};
-use notebook_server::{app, db, logging};
+use notebook_server::{app, db, logging, user};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -33,6 +33,11 @@ fn main() -> ExitCode {
         match cli.command {
             Command::Serve => app::serve(config).await,
             Command::Migrate => migrate(config).await,
+            Command::User(UserCommand::Add {
+                username,
+                admin,
+                passphrase_stdin,
+            }) => user::add(config, &username, admin, passphrase_stdin).await,
         }
     });
     // Cancels connection tasks left after the grace period instead of

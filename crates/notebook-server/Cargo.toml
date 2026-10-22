@@ -9,10 +9,16 @@ publish.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 clap.workspace = true
 governor.workspace = true
 notebook-core.workspace = true
+opaque-ke.workspace = true
+rand_core.workspace = true
+rpassword.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 # sqlx links libsqlite3-sys; rusqlite in local-sqlite-storage must pick a
 # compatible version, since Cargo allows one `links = "sqlite3"` crate.
 sqlx.workspace = true
@@ -22,10 +28,11 @@ tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["json", "env-filter"] }
+ulid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
-serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 

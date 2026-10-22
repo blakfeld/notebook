@@ -65,6 +65,14 @@ subcommands):
 NOTEBOOK_PUBLIC_URL=http://localhost:8080 cargo run -p notebook-server -- serve
 ```
 
+It creates `opaque-server.key` (the OPAQUE key file) next to the database on
+first start. HTTP registration is closed, so create an account from the
+command line; it prints the account's recovery key once:
+
+```sh
+NOTEBOOK_PUBLIC_URL=http://localhost:8080 cargo run -p notebook-server -- user add alice
+```
+
 See [docs/deployment.md](docs/deployment.md) for configuration, the reverse
 proxy, backups, and upgrades.
 
