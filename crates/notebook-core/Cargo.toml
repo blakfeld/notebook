@@ -10,11 +10,13 @@ publish.workspace = true
 [dependencies]
 argon2.workspace = true
 chacha20poly1305.workspace = true
+dissimilar.workspace = true
 getrandom.workspace = true
 hkdf.workspace = true
 pulldown-cmark.workspace = true
 sha2.workspace = true
 ulid.workspace = true
+yrs.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

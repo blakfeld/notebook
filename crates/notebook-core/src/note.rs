@@ -97,6 +97,28 @@ impl Note {
         }
     }
 
+    /// Rebuilds a note from stored state, for documents that hold their
+    /// timestamps and flags separately.
+    pub(crate) fn from_parts(
+        id: NoteId,
+        body: String,
+        created: Timestamp,
+        updated: Timestamp,
+        pinned: bool,
+        archived: bool,
+        trashed: bool,
+    ) -> Self {
+        Self {
+            id,
+            body,
+            created,
+            updated,
+            pinned,
+            archived,
+            trashed,
+        }
+    }
+
     pub fn id(&self) -> NoteId {
         self.id
     }
@@ -330,6 +352,17 @@ mod tests {
         n.set_trashed(true);
         assert!(n.is_trashed());
         assert!(n.is_pinned());
+    }
+
+    #[test]
+    fn note_from_parts_reports_every_field() {
+        let n = Note::from_parts(id(2), "# Kept\nbody".into(), T1, T2, true, false, true);
+        assert_eq!(n.id(), id(2));
+        assert_eq!(n.body(), "# Kept\nbody");
+        assert_eq!(n.created(), T1);
+        assert_eq!(n.updated(), T2);
+        assert!(n.is_pinned() && !n.is_archived() && n.is_trashed());
+        assert_eq!(n.title(), "Kept");
     }
 
     #[test]

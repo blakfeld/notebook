@@ -25,6 +25,6 @@ A note must be editable on any client (native app, browser, mobile), sometimes c
 
 - `notebook-core`: new `document` module. Depends on the `notes` and `vault-crypto` capabilities.
 - `notes`: a crate-internal constructor so a document can rebuild a `Note` with its stored timestamps and flags. Note behavior is unchanged.
-- Dependencies: `yrs` (0.28) and `dissimilar` (character diff for whole-body sets), both of which must build for `wasm32-unknown-unknown`.
+- Dependencies: `yrs` (0.28, vendored under `vendor/yrs` with robustness patches for crafted updates) and `dissimilar` (character diff for whole-body sets), both of which must build for `wasm32-unknown-unknown`.
 - Out of scope: the plaintext editor exchange between the core and the open editor. `note-editor-component` adds it to this capability, and it never feeds storage or sync.
 - Sets the data format persisted by local storage and transmitted by sync, so changing it later is costly. The design should treat it as a long-lived format.

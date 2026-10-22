@@ -1,10 +1,10 @@
-# Spec Delta
+# note-documents Specification
 
 ## Purpose
 
 Defines how each note is held as a CRDT document that every client edits and merges locally, how its encrypted updates and snapshots are produced and applied, and the current note state those documents yield.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Document per note
 Each note SHALL be represented by its own CRDT document, bound to one vault ID and one note ID for its whole life. The document SHALL hold the note's markdown body as shared text and its created time, updated time, and pinned, archived, and trashed flags as shared metadata.
@@ -69,6 +69,10 @@ Copies of a document that have applied the same set of updates SHALL have identi
 - **WHEN** an update that was already applied is applied again
 - **THEN** the document's state is unchanged
 
+#### Scenario: Replicas that drew the same identity
+- **WHEN** a document receives an update made by another replica under its own internal identity
+- **THEN** it switches to a fresh identity, keeps its state, and later exchanges still converge
+
 #### Scenario: Concurrent flag changes
 - **WHEN** one copy pins a note and another unpins it concurrently, then they exchange updates
 - **THEN** both copies report the same pinned value
@@ -115,7 +119,7 @@ Every update and snapshot a document produces for storage or sync SHALL be encry
 - **THEN** loading fails
 
 ### Requirement: Bad input leaves the document unchanged
-Applying an update or loading a snapshot that fails decryption, has an unknown document format, or does not decode SHALL return an error and leave the document's state exactly as it was. Bad input SHALL NOT cause a panic.
+Applying an update or loading a snapshot that fails decryption, has an unknown document format, does not decode, exceeds the size limit, or holds content a note document cannot contain SHALL return an error and leave the document's state exactly as it was. Bad input SHALL NOT cause a panic or an allocation out of proportion to its size.
 
 #### Scenario: Tampered update
 - **WHEN** an update with one byte changed is applied
@@ -128,6 +132,14 @@ Applying an update or loading a snapshot that fails decryption, has an unknown d
 #### Scenario: Unknown document format
 - **WHEN** a correctly encrypted update declares a document format this client does not know
 - **THEN** applying fails with an unsupported-format error, distinct from a malformed update
+
+#### Scenario: Oversized update
+- **WHEN** a correctly encrypted update whose plaintext is larger than the document size limit is applied
+- **THEN** applying fails with a malformed-update error and the state is unchanged
+
+#### Scenario: Content outside the document schema
+- **WHEN** a correctly encrypted update adds a root other than the body and metadata, an item whose parent is another item, or content other than text and plain values
+- **THEN** applying fails with a malformed-update error and the state is unchanged, even if part of the update would have been valid on its own
 
 ### Requirement: Versioned document format
 The plaintext of every update and snapshot SHALL begin with a document format identifier, so a later client can change the encoding while still reading data written in the current format. The encoding of the current format SHALL be fixed and covered by a test vector.
