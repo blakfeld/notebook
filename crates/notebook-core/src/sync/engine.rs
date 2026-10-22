@@ -915,9 +915,7 @@ where
             // remotely; its queued updates go with it. Purged: another
             // device got there first.
             Ok(())
-            | Err(Failure::Transport(
-                TransportError::UnknownNote | TransportError::NotePurged,
-            )) => {
+            | Err(Failure::Transport(TransportError::UnknownNote | TransportError::NotePurged)) => {
                 self.connected = Some(true);
                 self.replica
                     .lock()
