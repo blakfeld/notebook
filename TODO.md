@@ -1,64 +1,84 @@
 # TODO
 
-The OpenSpec changes for Notebook, in priority order. Each one lives in
+The OpenSpec changes for Notebook, grouped into waves. Each one lives in
 `openspec/changes/<name>/` (archived ones in `openspec/changes/archive/`).
-Work top to bottom. Archive each change before starting any later change that
-modifies its capability.
+
+Changes within a wave don't depend on each other and can be worked in
+parallel. A wave starts once the changes it depends on are archived; the
+"needs" line on each change says exactly which, so a change can start before
+the rest of its previous wave is done. An "archive after" line means the change
+can be built in parallel, but its final checks need the named change first.
+Archive each change before starting any later change that modifies its
+capability.
 
 Milestones mark the points where something usable exists.
 
 Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived.
 
-## Foundation
+## Done
 
-1. [x] `scaffold-workspace`: Cargo workspace (core, server, app), TS frontend, CI, wasm32 build check
-2. [x] `note-model-and-tags`: note model, Bear-style nested inline tags, derived tag tree, tag rename
-3. [x] `vault-encryption`: key hierarchy, per-note keys, XChaCha20-Poly1305, recovery key
-4. [x] `crdt-note-documents`: per-note CRDT docs (Yrs), encrypted updates and snapshots
-5. [x] `local-sqlite-storage`: Storage trait, SQLite (native) and in-memory implementations
+- [x] `scaffold-workspace`: Cargo workspace (core, server, app), TS frontend, CI, wasm32 build check
+- [x] `note-model-and-tags`: note model, Bear-style nested inline tags, derived tag tree, tag rename
+- [x] `vault-encryption`: key hierarchy, per-note keys, XChaCha20-Poly1305, recovery key
+- [x] `crdt-note-documents`: per-note CRDT docs (Yrs), encrypted updates and snapshots
+- [x] `local-sqlite-storage`: Storage trait, SQLite (native) and in-memory implementations
+- [x] `server-foundation`: axum binary, config, SQLite, static hosting, rate limits, security headers, operator CLI
+- [x] `opaque-accounts`: OPAQUE register/login, sessions, server-stored encrypted key bundle, recovery
+- [x] `sync-server`: encrypted op log, bootstrap, incremental pull, WebSocket live updates, compaction
+- [x] `sync-client-engine`: outbox, push/pull, bootstrap, live mode, snapshotting, sync status
 
-## Server
+## Wave 1 (can start now)
 
-6. [x] `server-foundation`: axum binary, config, SQLite, static hosting, rate limits, security headers, operator CLI
-7. [x] `opaque-accounts`: OPAQUE register/login, sessions, server-stored encrypted key bundle, recovery
-8. [x] `sync-server`: encrypted op log, bootstrap, incremental pull, WebSocket live updates, compaction
+- [ ] `note-editor-component`: CodeMirror 6 markdown editor, CRDT binding, optional per-device vim mode
+  - Needs: nothing outstanding. Frontend (`web/src/editor/`) plus the `note-documents` editor exchange.
+- [ ] `invite-codes`: invite-gated registration, per-vault storage quotas
+  - Needs: nothing outstanding. Server and `notebook-core::auth`; no UI.
 
-## Sync and first client
+> `invite-codes` adds `invite_code` to `Registration::start`, which the
+> `desktop-app-shell` register screen calls. Landing it first avoids reworking
+> that screen; if it lands second, it updates the call site.
 
-9. [x] `sync-client-engine`: outbox, push/pull, bootstrap, live mode, snapshotting, sync status
-10. [ ] `note-editor-component`: CodeMirror 6 markdown editor, CRDT binding, optional per-device vim mode
-11. [ ] `desktop-app-shell`: Tauri desktop app with sign-in, tag sidebar, note list, editor, search
+## Wave 2
 
-> **Milestone: usable on desktop.** Single user, account created from the server CLI.
+- [ ] `desktop-app-shell`: Tauri desktop app with sign-in, tag sidebar, note list, editor, search
+  - Needs: `note-editor-component`. Should follow `invite-codes` (see above).
 
-12. [ ] `markdown-export`: export all notes as markdown (folder on native, zip in browser)
+> **Milestone: usable on desktop.** Accounts created from the server CLI.
+>
+> **Milestone: safe to let other people onto the public server** once
+> `invite-codes` is also archived.
 
-> Done early because with E2EE, export is the user's only backup if keys are lost.
+## Wave 3
 
-## Edit from anywhere
+- [ ] `markdown-export`: export all notes as markdown (folder on native, zip in browser)
+  - Needs: `desktop-app-shell` (modifies `app-shell`).
+  - Do this first if only one change is in flight: with E2EE, export is the user's only backup if keys are lost.
+- [ ] `editor-live-preview`: beautiful editor with hidden syntax, typography, themes, focus mode
+  - Needs: `note-editor-component` (modifies `note-editor`), `desktop-app-shell` (Settings view).
+  - Archive after `browser-web-client`: several of its checks run in the browser, and the
+    browser's preference allowlist (`prefs.ts`) must gain `editor.sourceView` and `editor.focusMode`.
 
-13. [ ] `browser-web-client`: thin WASM browser client, in-memory sessions, nothing persisted
+## Wave 4
+
+- [ ] `browser-web-client`: thin WASM browser client, in-memory sessions, nothing persisted
+  - Needs: `desktop-app-shell`, `markdown-export`. Does not need `editor-live-preview`.
+- [ ] `mobile-app`: Tauri iOS/Android, stacked navigation, touch toolbar, biometric unlock
+  - Needs: `desktop-app-shell` and `markdown-export` (modifies both capabilities), `editor-live-preview`.
+  - Archive after `browser-web-client`: its 390 px browser check and desktop/browser/phone
+    convergence check need the browser client.
 
 > **Milestone: edit the same note on desktop and in the browser.** This is the core promise.
 
-14. [ ] `invite-codes`: invite-gated registration, per-vault storage quotas
+## Parallel work notes
 
-> **Milestone: safe to let other people onto the public server.**
-
-## Polish and reach
-
-15. [ ] `editor-live-preview`: beautiful editor with hidden syntax, typography, themes, focus mode
-16. [ ] `mobile-app`: Tauri iOS/Android, stacked navigation, touch toolbar, biometric unlock
-
-## Notes on ordering
-
-- `invite-codes` comes after the browser client because accounts can be created
-  from the server CLI until others need to sign up. It modifies `accounts`, so
-  `opaque-accounts` must be archived first.
-- `markdown-export` modifies `app-shell`, so it follows `desktop-app-shell`.
-- `editor-live-preview` modifies `note-editor`. `mobile-app` modifies `app-shell`
-  and benefits from live preview being in place.
-- Items 2-5 and 6-7 don't depend on each other and can be worked in parallel.
+- Wave 1 changes don't overlap: `note-editor-component` is frontend plus core
+  `NoteDocument`/`Replica`; `invite-codes` is server plus core auth.
+- Wave 3 changes modify different capabilities but both add to the Settings
+  view; expect a small merge in `web/`.
+- Wave 4 changes don't modify each other's capabilities. `mobile-app` modifies
+  `app-shell`, which `browser-web-client` reuses as-is, so rebase the browser
+  client onto any `app-shell` change from mobile (the stacked layout applies to
+  narrow browser windows too).
 
 ## Later / out of scope for now
 
