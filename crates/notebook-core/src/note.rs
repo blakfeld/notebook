@@ -24,9 +24,15 @@ impl NoteId {
         Self(Ulid::from_parts(timestamp_ms, random))
     }
 
-    /// The 16-byte binary ULID, used to bind ciphertexts to their note.
-    pub(crate) fn to_bytes(self) -> [u8; 16] {
+    /// The 16-byte binary ULID, used to bind ciphertexts to their note and
+    /// as the stored form.
+    pub fn to_bytes(self) -> [u8; 16] {
         self.0.to_bytes()
+    }
+
+    /// Rebuilds an identifier from its [`to_bytes`](Self::to_bytes) form.
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(Ulid::from_bytes(bytes))
     }
 }
 

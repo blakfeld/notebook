@@ -1,0 +1,19 @@
+[package]
+name = "notebook-storage-sqlite"
+description = "SQLite local storage for native Notebook clients"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+notebook-core.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+notebook-core = { workspace = true, features = ["conformance"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
