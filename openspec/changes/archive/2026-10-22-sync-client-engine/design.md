@@ -199,6 +199,8 @@ struct SyncStatus { state: Synced | Syncing | Offline, pending: usize,
 - [Skipping tampered updates hides lost data] → Integrity warnings are surfaced. Tampered data couldn't be recovered anyway.
 - [Purge needs a connection] → Clear error, and the note stays trashed. Rare action.
 - [Resync after a server restore can resurrect notes purged after the backup] → Documented. The user can purge them again.
+- [Purge tombstones and `410` responses aren't authenticated, so a malicious server can delete any note on every device, unpushed edits included] → Accepted. An honest purge can reach a device that never saw the note trashed, so the client can't require that. Flushing before purge and a local quarantine of purged notes are possible later protocol changes.
+- [A server that keeps answering `404`/`422` would make the client rebuild storage repeatedly] → Resyncs after the first are backed off until a push succeeds.
 - [Native mutex shared by UI and engine threads] → Held only for synchronous replica calls. Decrypt/apply runs per page, and server pages are capped at ~2 MiB.
 - [Wasm transport has no automated runtime test in CI] → Engine logic is shared and tested through the fake transport. The wasm transport is thin and covered by the wasm32 build check, plus the browser client's end-to-end testing later.
 

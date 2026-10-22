@@ -29,5 +29,7 @@ step "rust: test"
 cargo test --workspace
 step "rust: wasm32 core build"
 cargo build -p notebook-core --target wasm32-unknown-unknown
+cargo build -p notebook-core --target wasm32-unknown-unknown --features transport-wasm
+cargo clippy -p notebook-core --target wasm32-unknown-unknown --features transport-wasm -- -D warnings
 
 printf '\nAll checks passed.\n'

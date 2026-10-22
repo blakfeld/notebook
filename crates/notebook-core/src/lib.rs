@@ -10,6 +10,7 @@ pub mod document;
 pub mod note;
 pub mod protocol;
 pub mod storage;
+pub mod sync;
 pub mod tags;
 
 /// Returns the version of `notebook-core`.

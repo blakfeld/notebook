@@ -216,6 +216,13 @@ impl NoteDocument {
         encrypt_snapshot(&self.key, self.vault, self.id, &self.full_state())
     }
 
+    /// The same full state as [`snapshot`](Self::snapshot), encrypted as an
+    /// update, so it can be pushed like any local change (the sync engine
+    /// re-sends every note this way after a server restore).
+    pub fn full_update(&self) -> Result<EncryptedUpdate, DocumentError> {
+        self.encrypt_update(&self.full_state())
+    }
+
     fn set_flag(
         &mut self,
         key: &str,
@@ -1477,6 +1484,23 @@ mod tests {
             .load_snapshot(a.snapshot().unwrap().as_bytes())
             .unwrap();
         assert_same(&a, &fresh);
+    }
+
+    #[test]
+    fn full_update_reproduces_the_state() {
+        let f = Fixture::new();
+        let (mut a, _) = f.create("one");
+        a.set_body("one two", T2).unwrap().unwrap();
+        a.set_pinned(true).unwrap().unwrap();
+        let full = a.full_update().unwrap();
+        let mut fresh = f.open();
+        fresh.apply_update(full.as_bytes()).unwrap();
+        assert_same(&a, &fresh);
+        // Encrypted as an update, so it doesn't load as a snapshot.
+        assert!(matches!(
+            f.open().load_snapshot(full.as_bytes()),
+            Err(DocumentError::Crypto(_))
+        ));
     }
 
     #[test]

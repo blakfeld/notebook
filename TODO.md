@@ -25,7 +25,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 ## Sync and first client
 
-9. [ ] `sync-client-engine`: outbox, push/pull, bootstrap, live mode, snapshotting, sync status
+9. [x] `sync-client-engine`: outbox, push/pull, bootstrap, live mode, snapshotting, sync status
 10. [ ] `note-editor-component`: CodeMirror 6 markdown editor, CRDT binding, optional per-device vim mode
 11. [ ] `desktop-app-shell`: Tauri desktop app with sign-in, tag sidebar, note list, editor, search
 
