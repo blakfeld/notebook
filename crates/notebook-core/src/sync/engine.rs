@@ -124,7 +124,9 @@ pub struct SyncEngine<S: Storage, T: Transport, M: Timer, A: SessionSource> {
     /// Retry pushing at this time while the quota is full.
     quota_until: Option<u64>,
     too_large: Option<NoteId>,
-    push_blocked: bool,
+    /// The notes in a batch the server rejected with a conflict. Pushing
+    /// stays paused until every one of them is purged.
+    push_blocked: BTreeSet<NoteId>,
     sign_in_required: bool,
     upgrade_required: bool,
     integrity_warnings: u32,
@@ -187,7 +189,7 @@ where
             quota_full: false,
             quota_until: None,
             too_large: None,
-            push_blocked: false,
+            push_blocked: BTreeSet::new(),
             sign_in_required: false,
             upgrade_required: false,
             integrity_warnings: 0,
@@ -209,6 +211,7 @@ where
         let issues = self.replica.lock().take_open_issues();
         self.report(Applied {
             changed: BTreeSet::new(),
+            purged: BTreeSet::new(),
             issues,
         });
         self.emit_status();
@@ -423,7 +426,7 @@ where
         let inflight = self.live.as_ref().is_some_and(|l| l.inflight.is_some());
         self.connected == Some(true)
             && !inflight
-            && !self.push_blocked
+            && self.push_blocked.is_empty()
             && self.too_large.is_none()
             && self.quota_until.is_none_or(|until| self.now() >= until)
             && self.pending() > 0
@@ -814,7 +817,8 @@ where
                 Ok(())
             }
             Err(TransportError::OpIdConflict | TransportError::NoteKeyConflict) => {
-                self.push_blocked = true;
+                self.push_blocked
+                    .extend(batch.updates.iter().map(|u| u.note));
                 self.warn(batch.updates[0].note);
                 Ok(())
             }
@@ -825,10 +829,19 @@ where
     /// Removes a note the server says was purged, and reports it.
     fn purged_elsewhere(&mut self, note: NoteId) -> Result<(), StorageError> {
         self.replica.lock().delete_note(note)?;
+        self.note_gone(note);
         let _ = self
             .events
             .unbounded_send(SyncEvent::NotesChanged(vec![note]));
         Ok(())
+    }
+
+    /// Lifts any push pause caused by a note that no longer exists.
+    fn note_gone(&mut self, note: NoteId) {
+        if self.too_large == Some(note) {
+            self.too_large = None;
+        }
+        self.push_blocked.remove(&note);
     }
 
     /// Uploads at most one due snapshot, then compacts the note locally.
@@ -899,19 +912,32 @@ where
         }
         match self.call(async |t, token| t.purge(token, note).await).await {
             // Unknown: it was never pushed, so there is nothing to purge
-            // remotely; its queued updates go with it.
-            Ok(()) | Err(Failure::Transport(TransportError::UnknownNote)) => {
+            // remotely; its queued updates go with it. Purged: another
+            // device got there first.
+            Ok(())
+            | Err(Failure::Transport(
+                TransportError::UnknownNote | TransportError::NotePurged,
+            )) => {
                 self.connected = Some(true);
                 self.replica
                     .lock()
                     .delete_note(note)
                     .map_err(SyncError::Storage)?;
-                if self.too_large == Some(note) {
-                    self.too_large = None;
-                }
+                self.note_gone(note);
                 self.emit_status();
                 Ok(())
             }
+            // The server answered but refused this one request: report it
+            // without treating the connection as down.
+            Err(Failure::Transport(
+                err @ (TransportError::BadRequest
+                | TransportError::OpIdConflict
+                | TransportError::NoteKeyConflict
+                | TransportError::SnapshotStale
+                | TransportError::UpdateTooLarge
+                | TransportError::MissingNoteKey
+                | TransportError::QuotaExceeded),
+            )) => Err(SyncError::Rejected(err)),
             Err(failure) => Err(self.fail(failure)),
         }
     }
@@ -1112,7 +1138,7 @@ where
             Ok(())
         } else if self.sign_in_required {
             Err(SyncError::SignInRequired)
-        } else if self.push_blocked {
+        } else if !self.push_blocked.is_empty() {
             Err(SyncError::PushBlocked)
         } else if let Some(note) = self.too_large {
             Err(SyncError::UpdateTooLarge(note))
@@ -1135,6 +1161,9 @@ where
         if !applied.changed.is_empty() {
             let notes = applied.changed.into_iter().collect();
             let _ = self.events.unbounded_send(SyncEvent::NotesChanged(notes));
+        }
+        for note in applied.purged {
+            self.note_gone(note);
         }
         for note in applied.issues.integrity {
             self.warn(note);
@@ -1159,6 +1188,8 @@ where
         };
         let attention = if self.sign_in_required {
             Some(Attention::SignInRequired)
+        } else if !self.push_blocked.is_empty() {
+            Some(Attention::PushBlocked)
         } else if let Some(note) = self.too_large {
             Some(Attention::UpdateTooLarge(note))
         } else if self.quota_full {

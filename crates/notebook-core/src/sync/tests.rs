@@ -542,6 +542,29 @@ fn update_too_large_splits_batches_then_pauses() {
 }
 
 #[test]
+fn too_large_note_purged_elsewhere_resumes_pushing() {
+    let mut sim = Sim::new();
+    let a = sim.device();
+    let b = sim.device();
+    let big = a.create("big");
+    sim.advance(Duration::from_secs(1));
+    sim.server.set_max_update_bytes(2000);
+    a.set_body(big, &"x".repeat(4000));
+    sim.advance(Duration::from_secs(2));
+    assert_eq!(a.status().attention, Some(Attention::UpdateTooLarge(big)));
+
+    b.replica.lock().set_trashed(big, true).unwrap();
+    sim.advance(Duration::from_secs(1));
+    assert_eq!(sim.purge(&b, big), Ok(()));
+    let later = a.create("later");
+    sim.advance(Duration::from_secs(2));
+    assert_eq!(a.body(big), None);
+    assert_eq!(a.status().attention, None);
+    assert_eq!(a.pending(), 0);
+    assert!(sim.server.live_notes().contains(&later));
+}
+
+#[test]
 fn offline_edit_to_a_note_purged_elsewhere_is_discarded() {
     let mut sim = Sim::new();
     let a = sim.device();
@@ -630,6 +653,31 @@ fn conflict_blocks_pushes_with_a_warning() {
     assert_eq!(sim.flush(&a), Err(SyncError::PushBlocked));
     sim.advance(Duration::from_secs(60));
     assert_eq!(sim.server.count(Endpoint::LivePush), 1);
+}
+
+#[test]
+fn conflict_shows_attention_until_the_note_is_purged_elsewhere() {
+    let mut sim = Sim::new();
+    let a = sim.device();
+    let b = sim.device();
+    let id = a.create("shared");
+    sim.advance(Duration::from_secs(1));
+    sim.server.inject(
+        Endpoint::LivePush,
+        Fault::Reject(TransportError::OpIdConflict),
+    );
+    a.set_body(id, "shared, conflicted");
+    sim.advance(Duration::from_secs(1));
+    assert_eq!(a.status().attention, Some(Attention::PushBlocked));
+
+    b.replica.lock().set_trashed(id, true).unwrap();
+    sim.advance(Duration::from_secs(1));
+    assert_eq!(sim.purge(&b, id), Ok(()));
+    let later = a.create("later");
+    sim.advance(Duration::from_secs(2));
+    assert_eq!(a.status().attention, None);
+    assert_eq!(a.pending(), 0);
+    assert!(sim.server.live_notes().contains(&later));
 }
 
 #[test]
@@ -1046,6 +1094,42 @@ fn purge_while_offline_fails_and_changes_nothing() {
     sim.advance(Duration::from_secs(70));
     assert_eq!(sim.purge(&a, id), Ok(()));
     assert_eq!(a.body(id), None);
+}
+
+#[test]
+fn purge_already_done_elsewhere_succeeds() {
+    let mut sim = Sim::new();
+    let a = sim.device();
+    let id = a.create("gone");
+    sim.advance(Duration::from_secs(1));
+    a.replica.lock().set_trashed(id, true).unwrap();
+    sim.advance(Duration::from_secs(1));
+    sim.server
+        .inject(Endpoint::Purge, Fault::Reject(TransportError::NotePurged));
+    assert_eq!(sim.purge(&a, id), Ok(()));
+    assert_eq!(a.body(id), None);
+    assert_eq!(a.status().state, SyncState::Synced);
+}
+
+#[test]
+fn rejected_purge_keeps_the_connection() {
+    let mut sim = Sim::new();
+    let a = sim.device();
+    let id = a.create("kept");
+    sim.advance(Duration::from_secs(1));
+    a.replica.lock().set_trashed(id, true).unwrap();
+    sim.advance(Duration::from_secs(1));
+    let connections = sim.server.count(Endpoint::Connect);
+    sim.server
+        .inject(Endpoint::Purge, Fault::Reject(TransportError::BadRequest));
+    assert_eq!(
+        sim.purge(&a, id),
+        Err(SyncError::Rejected(TransportError::BadRequest))
+    );
+    sim.advance(Duration::from_secs(1));
+    assert!(a.replica.lock().note(id).unwrap().is_trashed());
+    assert_eq!(a.status().state, SyncState::Synced);
+    assert_eq!(sim.server.count(Endpoint::Connect), connections);
 }
 
 #[test]

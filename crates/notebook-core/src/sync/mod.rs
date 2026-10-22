@@ -156,6 +156,9 @@ pub enum Attention {
     /// This note has an update larger than the server accepts; pushes are
     /// paused.
     UpdateTooLarge(NoteId),
+    /// The server reported a conflict this client can't resolve; pushes are
+    /// paused.
+    PushBlocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -99,6 +99,8 @@ impl Issues {
 pub(crate) struct Applied {
     /// Notes whose materialized state changed, created and purged included.
     pub(crate) changed: BTreeSet<NoteId>,
+    /// Notes the page purged, whether or not this device had them.
+    pub(crate) purged: BTreeSet<NoteId>,
     pub(crate) issues: Issues,
 }
 
@@ -475,6 +477,7 @@ impl<S: Storage> Replica<S> {
                 applied.changed.insert(note);
             }
         }
+        applied.purged = purged;
         Ok(applied)
     }
 
