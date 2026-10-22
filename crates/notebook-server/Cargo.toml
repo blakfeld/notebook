@@ -35,6 +35,7 @@ zeroize.workspace = true
 [dev-dependencies]
 futures-util.workspace = true
 http-body-util.workspace = true
+notebook-core = { workspace = true, features = ["transport-native", "test-util"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true

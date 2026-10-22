@@ -32,10 +32,14 @@ chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dashmap = "6.2.1"
 dissimilar = "1.0.11"
+futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 getrandom = "0.4.3"
+gloo-net = { version = "0.7.0", default-features = false, features = ["http", "websocket"] }
+gloo-timers = { version = "0.4.0", features = ["futures"] }
 governor = "0.10.4"
 hkdf = "0.13.0"
+js-sys = "0.3.106"
 http-body-util = "0.1.5"
 # Pinned exactly: a version bump can change stored OPAQUE records and the wire
 # format (see the recorded-transcript test in notebook-core's auth module).
@@ -45,6 +49,7 @@ rand_core = { version = "0.6.4", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
 # rusqlite and sqlx must link the same libsqlite3-sys (0.37), since Cargo allows
 # one `links = "sqlite3"` crate per workspace. Bump them together.
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 rpassword = "7.4.0"
 rusqlite = { version = "0.39.0", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
