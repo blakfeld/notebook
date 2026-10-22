@@ -10,4 +10,5 @@ pub mod logging;
 pub mod rate_limit;
 pub mod security;
 pub mod static_files;
+pub mod sync;
 pub mod user;

@@ -30,7 +30,9 @@ axum = "0.8.9"
 base64 = "0.22.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
+dashmap = "6.2.1"
 dissimilar = "1.0.11"
+futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 getrandom = "0.4.3"
 governor = "0.10.4"
 hkdf = "0.13.0"
@@ -55,6 +57,7 @@ tauri = { version = "2.12.4", features = [] }
 tauri-build = { version = "2.7.3", features = [] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros"] }
+tokio-tungstenite = "0.29.0"
 toml = "1.1.8"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.11", features = ["fs", "limit", "timeout", "trace", "set-header"] }

@@ -20,7 +20,8 @@ use tracing::Span;
 use crate::auth::{self, AuthState, RegistrationPolicy, Setup};
 use crate::config::Config;
 use crate::rate_limit::KeyedLimiter;
-use crate::{client_ip, db, rate_limit, security, static_files};
+use crate::sync::{LiveSettings, SyncState};
+use crate::{client_ip, db, rate_limit, security, static_files, sync};
 
 /// How long in-flight requests get to finish after a shutdown signal.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
@@ -39,6 +40,7 @@ pub struct AppState {
     /// The global per-client limiter applied to every request.
     pub limiter: Arc<KeyedLimiter>,
     pub auth: Arc<AuthState>,
+    pub sync: Arc<SyncState>,
 }
 
 impl AppState {
@@ -54,6 +56,7 @@ impl AppState {
             config: Arc::new(config),
             limiter,
             auth: Arc::new(AuthState::new(setup, RegistrationPolicy::Closed)),
+            sync: Arc::new(SyncState::new(LiveSettings::default())),
         }
     }
 }
@@ -63,6 +66,7 @@ pub fn router(state: AppState) -> Router {
     let routes = Router::new()
         .route("/healthz", get(healthz))
         .merge(auth::routes(&state))
+        .merge(sync::routes())
         .with_state(state.clone())
         .fallback_service(static_files::router(state.config.static_dir.as_deref()));
     harden(routes, &state)
@@ -156,7 +160,13 @@ pub async fn serve(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(pool.clone(), config, setup);
     let _retain = rate_limit::spawn_retain_task(&state.limiter);
     let _auth_tasks = state.auth.spawn_tasks(&pool);
-    let result = run(listener, router(state), shutdown_signal()).await;
+    let sync = state.sync.clone();
+    let shutdown = async move {
+        shutdown_signal().await;
+        // Live sockets would otherwise hold their tasks open; send them 4004.
+        sync.shutdown();
+    };
+    let result = run(listener, router(state), shutdown).await;
     // Connection tasks outlive `run` after the grace period and may still hold
     // pool connections, which `close` waits for; don't let them block exit.
     if tokio::time::timeout(POOL_CLOSE_TIMEOUT, pool.close())

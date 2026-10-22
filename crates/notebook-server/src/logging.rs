@@ -20,7 +20,12 @@ pub fn subscriber<W>(
 where
     W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
 {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
+    // tungstenite traces whole WebSocket frames (access tokens, payloads)
+    // through `log`. Nothing bridges `log` today; this keeps it off if
+    // something ever does.
+    let filter = EnvFilter::try_new(level)
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("tungstenite=off".parse().expect("valid directive"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_ansi(ansi)

@@ -39,6 +39,8 @@ pub struct AuthSession {
     pub user_id: Vec<u8>,
     pub vault_id: Vec<u8>,
     pub session_id: Vec<u8>,
+    /// When the presented access token expires, in Unix seconds.
+    pub access_expires_at: i64,
 }
 
 /// A newly created session's ID and tokens.
@@ -188,8 +190,9 @@ pub async fn refresh(pool: &SqlitePool, token: &str, now: i64) -> Result<Tokens,
     })
 }
 
-/// `user_id, vault_id, session_id, last_used_at` of a live session.
-type LiveSession = (Vec<u8>, Vec<u8>, Vec<u8>, i64);
+/// `user_id, vault_id, session_id, last_used_at, access_expires_at` of a
+/// live session.
+type LiveSession = (Vec<u8>, Vec<u8>, Vec<u8>, i64, i64);
 
 /// The one access-token check: a live session whose access token is
 /// unexpired, or `invalid_token`. `sync-server` calls this directly for
@@ -205,14 +208,15 @@ pub async fn authenticate_token_at(
 ) -> Result<AuthSession, ApiError> {
     let hash = token_hash(token).ok_or(ApiError::INVALID_TOKEN)?;
     let row: Option<LiveSession> = sqlx::query_as(
-        "SELECT user_id, vault_id, session_id, last_used_at FROM sessions \
+        "SELECT user_id, vault_id, session_id, last_used_at, access_expires_at FROM sessions \
          WHERE access_hash = ? AND access_expires_at > ?",
     )
     .bind(hash.as_slice())
     .bind(now)
     .fetch_optional(pool)
     .await?;
-    let (user_id, vault_id, session_id, last_used_at) = row.ok_or(ApiError::INVALID_TOKEN)?;
+    let (user_id, vault_id, session_id, last_used_at, access_expires_at) =
+        row.ok_or(ApiError::INVALID_TOKEN)?;
     if now - last_used_at >= LAST_USED_GRANULARITY_SECS {
         sqlx::query("UPDATE sessions SET last_used_at = ? WHERE session_id = ?")
             .bind(now)
@@ -224,6 +228,7 @@ pub async fn authenticate_token_at(
         user_id,
         vault_id,
         session_id,
+        access_expires_at,
     })
 }
 
@@ -407,6 +412,7 @@ mod tests {
         assert_eq!(session.user_id, USER);
         assert_eq!(session.vault_id, VAULT);
         assert_eq!(session.session_id, issued.session_id);
+        assert_eq!(session.access_expires_at, T0 + ACCESS_TTL_SECS);
     }
 
     #[tokio::test]
