@@ -18,7 +18,7 @@ impl ApiError {
     pub const INVALID_TOKEN: Self = Self(ErrorCode::InvalidToken);
     pub const SESSION_ENDED: Self = Self(ErrorCode::SessionEnded);
     pub const USERNAME_TAKEN: Self = Self(ErrorCode::UsernameTaken);
-    pub const REGISTRATION_CLOSED: Self = Self(ErrorCode::RegistrationClosed);
+    pub const INVALID_INVITE: Self = Self(ErrorCode::InvalidInvite);
     pub const NOT_FOUND: Self = Self(ErrorCode::NotFound);
     pub const UNAVAILABLE: Self = Self(ErrorCode::Unavailable);
     pub const INTERNAL: Self = Self(ErrorCode::Internal);
@@ -30,7 +30,7 @@ impl ApiError {
                 StatusCode::UNAUTHORIZED
             }
             ErrorCode::UsernameTaken => StatusCode::CONFLICT,
-            ErrorCode::RegistrationClosed => StatusCode::FORBIDDEN,
+            ErrorCode::InvalidInvite => StatusCode::FORBIDDEN,
             ErrorCode::NotFound => StatusCode::NOT_FOUND,
             ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::Internal => StatusCode::INTERNAL_SERVER_ERROR,

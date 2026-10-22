@@ -28,11 +28,16 @@ impl fmt::Debug for Token {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Debug` omits the invite code.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterStartRequest {
     pub username: String,
     #[serde(with = "b64")]
     pub registration_request: Vec<u8>,
+    /// Sent as typed; the server normalizes it. A missing code reads as
+    /// empty, so the server rejects it like any other invalid code.
+    #[serde(default)]
+    pub invite_code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,10 +46,14 @@ pub struct RegisterStartResponse {
     pub registration_response: Vec<u8>,
 }
 
-/// `Debug` omits the recovery verifier, which is enough to start recovery.
+/// `Debug` omits the recovery verifier, which is enough to start recovery,
+/// and the invite code.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegisterFinishRequest {
     pub username: String,
+    /// As in [`RegisterStartRequest::invite_code`].
+    #[serde(default)]
+    pub invite_code: String,
     #[serde(with = "b64")]
     pub registration_upload: Vec<u8>,
     #[serde(with = "b64")]
@@ -193,6 +202,14 @@ pub struct RecoverFinishRequest {
     pub session_kind: SessionKind,
 }
 
+impl fmt::Debug for RegisterStartRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegisterStartRequest")
+            .field("username", &self.username)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for RegisterFinishRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RegisterFinishRequest")
@@ -221,7 +238,8 @@ pub enum ErrorCode {
     InvalidToken,
     SessionEnded,
     UsernameTaken,
-    RegistrationClosed,
+    /// The invite code is missing, unknown, expired, revoked, or used.
+    InvalidInvite,
     /// No such session (or it belongs to someone else).
     NotFound,
     /// Too many handshakes in flight; retry later.
@@ -321,15 +339,25 @@ mod tests {
         let json = round_trip(&RegisterStartRequest {
             username: "alice".into(),
             registration_request: bytes.clone(),
+            invite_code: "7KQ2M-XW9PD-0RT4H-C6NBJ".into(),
         });
         // base64url, no padding.
         assert!(json.contains("\"-_8AAQ\""), "{json}");
+        assert!(
+            json.contains(r#""invite_code":"7KQ2M-XW9PD-0RT4H-C6NBJ""#),
+            "{json}"
+        );
+        // A request without a code reads as an empty one.
+        let start: RegisterStartRequest =
+            serde_json::from_str(r#"{"username":"alice","registration_request":""}"#).unwrap();
+        assert_eq!(start.invite_code, "");
 
         round_trip(&RegisterStartResponse {
             registration_response: bytes.clone(),
         });
         round_trip(&RegisterFinishRequest {
             username: "alice".into(),
+            invite_code: "7KQ2M-XW9PD-0RT4H-C6NBJ".into(),
             registration_upload: bytes.clone(),
             key_bundle: bytes.clone(),
             recovery_verifier: bytes.clone(),
@@ -427,6 +455,13 @@ mod tests {
             r#"{"error":"invalid_credentials"}"#
         );
         round_trip(&body);
+        let body = ErrorBody {
+            error: ErrorCode::InvalidInvite,
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            r#"{"error":"invalid_invite"}"#
+        );
     }
 
     #[test]
@@ -455,10 +490,16 @@ mod tests {
     }
 
     #[test]
-    fn recovery_verifier_debug_is_redacted() {
+    fn recovery_verifier_and_invite_debug_is_redacted() {
         let verifier = vec![0xab; 32];
+        let start = RegisterStartRequest {
+            username: "alice".into(),
+            registration_request: vec![],
+            invite_code: "SECRET-INVITE".into(),
+        };
         let register = RegisterFinishRequest {
             username: "alice".into(),
+            invite_code: "SECRET-INVITE".into(),
             registration_upload: vec![],
             key_bundle: vec![],
             recovery_verifier: verifier.clone(),
@@ -470,10 +511,11 @@ mod tests {
             recovery_verifier: verifier,
             registration_request: vec![],
         };
-        let debug = format!("{register:?} {recover:?}");
+        let debug = format!("{start:?} {register:?} {recover:?}");
         assert!(debug.contains("alice"), "{debug}");
         assert!(!debug.contains("171"), "{debug}");
         assert!(!debug.contains("verifier"), "{debug}");
+        assert!(!debug.contains("SECRET"), "{debug}");
     }
 
     #[test]

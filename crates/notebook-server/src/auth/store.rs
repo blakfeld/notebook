@@ -52,11 +52,13 @@ impl From<sqlx::Error> for CreateError {
     }
 }
 
-/// Inserts the user, vault, and key bundle. Run inside a transaction so a
-/// failure creates nothing; the username's `UNIQUE` constraint settles races.
+/// Inserts the user, vault (with a storage quota of `quota_bytes` and no
+/// usage), and key bundle. Run inside a transaction so a failure creates
+/// nothing; the username's `UNIQUE` constraint settles races.
 pub async fn create_account(
     tx: &mut SqliteConnection,
     account: &NewAccount<'_>,
+    quota_bytes: i64,
 ) -> Result<(), CreateError> {
     sqlx::query(
         "INSERT INTO users (user_id, username, opaque_record, recovery_verifier_hash, \
@@ -71,12 +73,15 @@ pub async fn create_account(
     .bind(account.now)
     .execute(&mut *tx)
     .await?;
-    sqlx::query("INSERT INTO vaults (vault_id, user_id, created_at) VALUES (?, ?, ?)")
-        .bind(account.vault_id.as_slice())
-        .bind(account.user_id.as_slice())
-        .bind(account.now)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "INSERT INTO vaults (vault_id, user_id, created_at, quota_bytes) VALUES (?, ?, ?, ?)",
+    )
+    .bind(account.vault_id.as_slice())
+    .bind(account.user_id.as_slice())
+    .bind(account.now)
+    .bind(quota_bytes)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("INSERT INTO key_bundles (vault_id, bundle, updated_at) VALUES (?, ?, ?)")
         .bind(account.vault_id.as_slice())
         .bind(account.key_bundle)
@@ -172,6 +177,8 @@ mod tests {
     use super::*;
     use crate::db;
 
+    const QUOTA: i64 = 50 * 1024 * 1024;
+
     fn account(username: &str, id: u8) -> NewAccount<'_> {
         NewAccount {
             user_id: [id; 16],
@@ -193,13 +200,22 @@ mod tests {
         assert!(!has_users(&pool).await.unwrap());
 
         let mut tx = pool.begin().await.unwrap();
-        create_account(&mut tx, &account("alice", 1)).await.unwrap();
+        create_account(&mut tx, &account("alice", 1), QUOTA)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
         assert!(has_users(&pool).await.unwrap());
 
         let mut conn = pool.acquire().await.unwrap();
         let user = find_by_username(&mut conn, "alice").await.unwrap().unwrap();
         assert_eq!(user.vault_id, vec![1; 16]);
+        assert_eq!(
+            crate::quota::usage(&mut conn, "alice").await.unwrap(),
+            Some(crate::quota::Usage {
+                used_bytes: 0,
+                quota_bytes: QUOTA
+            })
+        );
         assert_eq!(user.opaque_record, b"record");
         assert!(find_by_username(&mut conn, "bob").await.unwrap().is_none());
         assert_eq!(
@@ -226,11 +242,13 @@ mod tests {
         let pool = db::connect(&dir.path().join("db")).await.unwrap();
         db::migrate(&pool).await.unwrap();
         let mut tx = pool.begin().await.unwrap();
-        create_account(&mut tx, &account("alice", 1)).await.unwrap();
+        create_account(&mut tx, &account("alice", 1), QUOTA)
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
 
         let mut tx = pool.begin().await.unwrap();
-        let err = create_account(&mut tx, &account("alice", 2))
+        let err = create_account(&mut tx, &account("alice", 2), QUOTA)
             .await
             .unwrap_err();
         assert!(matches!(err, CreateError::UsernameTaken), "{err:?}");
@@ -239,7 +257,7 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
         let mut other = account("bob", 3);
         other.vault_id = [1; 16];
-        let err = create_account(&mut tx, &other).await.unwrap_err();
+        let err = create_account(&mut tx, &other, QUOTA).await.unwrap_err();
         assert!(matches!(err, CreateError::VaultTaken), "{err:?}");
         drop(tx);
 

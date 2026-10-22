@@ -31,7 +31,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 - [ ] `note-editor-component`: CodeMirror 6 markdown editor, CRDT binding, optional per-device vim mode
   - Needs: nothing outstanding. Frontend (`web/src/editor/`) plus the `note-documents` editor exchange.
-- [ ] `invite-codes`: invite-gated registration, per-vault storage quotas
+- [x] `invite-codes`: invite-gated registration, per-vault storage quotas
   - Needs: nothing outstanding. Server and `notebook-core::auth`; no UI.
 
 > `invite-codes` adds `invite_code` to `Registration::start`, which the

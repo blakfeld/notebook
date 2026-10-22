@@ -63,6 +63,12 @@ impl KeyedLimiter {
         Self::with_quota(quota)
     }
 
+    /// A limiter refilling `per_minute` tokens a minute, holding at most
+    /// `burst`.
+    pub fn per_minute(per_minute: NonZeroU32, burst: NonZeroU32) -> Self {
+        Self::with_quota(Quota::per_minute(per_minute).allow_burst(burst))
+    }
+
     fn with_quota(quota: Quota) -> Self {
         // Wider prefixes refill `multiplier` times faster and hold
         // `multiplier` times the burst.
@@ -258,6 +264,21 @@ mod tests {
         let wait = limiter.check(ip).unwrap_err();
         assert!(wait > Duration::from_secs(500), "{wait:?}");
         assert!(limiter.check("192.0.2.2".parse().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn per_minute_quota() {
+        let limiter =
+            KeyedLimiter::per_minute(NonZeroU32::new(2).unwrap(), NonZeroU32::new(3).unwrap());
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        for _ in 0..3 {
+            assert!(limiter.check(ip).is_ok());
+        }
+        let wait = limiter.check(ip).unwrap_err();
+        assert!(
+            wait > Duration::from_secs(25) && wait <= Duration::from_secs(30),
+            "{wait:?}"
+        );
     }
 
     #[test]

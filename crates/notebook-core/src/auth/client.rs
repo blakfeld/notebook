@@ -68,15 +68,18 @@ impl fmt::Debug for LoginKeys {
 pub struct Registration {
     username: Username,
     passphrase: Zeroizing<String>,
+    invite_code: String,
     state: ClientRegistration<Suite>,
 }
 
 impl Registration {
     /// Refuses an invalid username or a passphrase shorter than
-    /// [`MIN_PASSPHRASE_CHARS`] before producing any message.
+    /// [`MIN_PASSPHRASE_CHARS`] before producing any message. `invite_code`
+    /// is sent as typed in both requests; the server normalizes it.
     pub fn start(
         username: &str,
         passphrase: &str,
+        invite_code: &str,
     ) -> Result<(Self, RegisterStartRequest), AuthError> {
         let username = Username::parse(username)?;
         let passphrase = new_passphrase(passphrase)?;
@@ -85,11 +88,13 @@ impl Registration {
         let request = RegisterStartRequest {
             username: username.to_string(),
             registration_request: start.message.serialize().to_vec(),
+            invite_code: invite_code.to_owned(),
         };
         Ok((
             Self {
                 username,
                 passphrase,
+                invite_code: invite_code.to_owned(),
                 state: start.state,
             },
             request,
@@ -116,6 +121,7 @@ impl Registration {
         let bundle = KeyBundle::create(vault_id, &vault_key, &auth, &recovery_key)?;
         let request = RegisterFinishRequest {
             username: self.username.to_string(),
+            invite_code: self.invite_code,
             registration_upload: upload,
             key_bundle: bundle.to_bytes(),
             recovery_verifier: recovery_key.verifier().to_vec(),
@@ -425,7 +431,7 @@ mod tests {
         }
 
         fn register(&mut self, username: &str, passphrase: &str) -> NewAccount {
-            let (reg, start) = Registration::start(username, passphrase).unwrap();
+            let (reg, start) = Registration::start(username, passphrase, "").unwrap();
             self.log(&start);
             self.username = start.username.clone();
             let response = RegisterStartResponse {
@@ -574,7 +580,7 @@ mod tests {
         let eleven = "abcdefghijk";
         assert_eq!(eleven.chars().count(), 11);
         assert_eq!(
-            Registration::start("alice", eleven).unwrap_err(),
+            Registration::start("alice", eleven, "").unwrap_err(),
             AuthError::PassphraseTooShort
         );
         assert_eq!(
@@ -586,7 +592,7 @@ mod tests {
             AuthError::PassphraseTooShort
         );
         // Twelve scalar values, more bytes: accepted.
-        assert!(Registration::start("alice", "ééééééééééé1").is_ok());
+        assert!(Registration::start("alice", "ééééééééééé1", "").is_ok());
         // Login doesn't judge length.
         assert!(Login::start("alice", "short").is_ok());
     }
@@ -594,7 +600,7 @@ mod tests {
     #[test]
     fn invalid_username_is_refused() {
         assert_eq!(
-            Registration::start("al ice", &passphrase("one")).unwrap_err(),
+            Registration::start("al ice", &passphrase("one"), "").unwrap_err(),
             AuthError::InvalidUsername
         );
         assert_eq!(
@@ -752,7 +758,7 @@ mod tests {
             login.finish(&response, Device::default()).unwrap_err(),
             AuthError::Protocol
         );
-        let (reg, _) = Registration::start("alice", &passphrase("one")).unwrap();
+        let (reg, _) = Registration::start("alice", &passphrase("one"), "").unwrap();
         let response = RegisterStartResponse {
             registration_response: vec![0; 64],
         };
@@ -760,10 +766,12 @@ mod tests {
     }
 
     #[test]
-    fn device_is_carried_into_finish_requests() {
+    fn device_and_invite_are_carried_into_finish_requests() {
         let mut server = Server::new();
         server.username = "alice".into();
-        let (reg, start) = Registration::start("alice", &passphrase("one")).unwrap();
+        let (reg, start) =
+            Registration::start("alice", &passphrase("one"), " 7kq2m xw9pd ").unwrap();
+        assert_eq!(start.invite_code, " 7kq2m xw9pd ");
         let response = RegisterStartResponse {
             registration_response: server.registration_response(&start.registration_request),
         };
@@ -772,6 +780,7 @@ mod tests {
             kind: SessionKind::Browser,
         };
         let (finish, account) = reg.finish(&response, device, 1_234).unwrap();
+        assert_eq!(finish.invite_code, " 7kq2m xw9pd ");
         assert_eq!(finish.device_name, "Work laptop");
         assert_eq!(finish.session_kind, SessionKind::Browser);
         assert_eq!(finish.recovery_verifier, account.recovery_key.verifier());
@@ -786,7 +795,7 @@ mod tests {
     #[test]
     fn debug_output_has_no_secrets() {
         let secret = passphrase("debug");
-        let (reg, _) = Registration::start("alice", &secret).unwrap();
+        let (reg, _) = Registration::start("alice", &secret, "").unwrap();
         let (login, _) = Login::start("alice", &secret).unwrap();
         let (change, _) = PassphraseChange::start(&secret, &secret).unwrap();
         let recovery_key = RecoveryKey::generate().unwrap();

@@ -35,6 +35,17 @@ pub async fn migrate(pool: &SqlitePool) -> Result<(), DbError> {
     })
 }
 
+/// [`connect`] then [`migrate`], for operator commands that use the database
+/// directly (WAL lets them run alongside `serve`).
+pub async fn open(path: &Path) -> Result<SqlitePool, DbError> {
+    let pool = connect(path).await?;
+    if let Err(e) = migrate(&pool).await {
+        pool.close().await;
+        return Err(e);
+    }
+    Ok(pool)
+}
+
 #[derive(Debug)]
 pub enum DbError {
     Open(sqlx::Error),
@@ -205,6 +216,123 @@ mod tests {
         insert(12, 1).await.unwrap();
         let err = insert(11, 2).await.unwrap_err();
         assert!(err.to_string().contains("UNIQUE"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn invites_table_and_quota_columns_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = connect(&dir.path().join("db")).await.unwrap();
+        migrate(&pool).await.unwrap();
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+            .bind("invites")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            columns,
+            [
+                "id",
+                "code_hash",
+                "note",
+                "created_at",
+                "expires_at",
+                "revoked_at",
+                "used_at",
+                "used_by"
+            ]
+        );
+        let unique: Vec<String> = sqlx::query_scalar(
+            "SELECT c.name FROM pragma_index_list('invites') i, pragma_index_info(i.name) c \
+             WHERE i.\"unique\" = 1 AND i.origin = 'u'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(unique, ["code_hash"]);
+        let vaults: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT name, dflt_value FROM pragma_table_info('vaults')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(vaults.contains(&("quota_bytes".to_owned(), Some("104857600".to_owned()))));
+        assert!(vaults.contains(&("used_bytes".to_owned(), Some("0".to_owned()))));
+    }
+
+    #[tokio::test]
+    async fn quota_migration_backfills_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = connect(&dir.path().join("db")).await.unwrap();
+        // The schema as `sync-server` left it.
+        MIGRATOR.run_to(2, &pool).await.unwrap();
+        for (id, seq_payloads, snapshot) in [
+            (1u8, &[3usize, 5][..], Some(7usize)),
+            (2, &[11][..], None),
+            (3, &[][..], None),
+        ] {
+            sqlx::query(
+                "INSERT INTO users (user_id, username, opaque_record, recovery_verifier_hash, \
+                 created_at, updated_at) VALUES (?, ?, x'00', x'00', 0, 0)",
+            )
+            .bind(vec![id; 16])
+            .bind(format!("u{id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query("INSERT INTO vaults (vault_id, user_id, created_at) VALUES (?, ?, 0)")
+                .bind(vec![id; 16])
+                .bind(vec![id; 16])
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO sync_notes (vault_id, note_id, wrapped_key, created_seq) \
+                 VALUES (?, x'01', x'00', 1)",
+            )
+            .bind(vec![id; 16])
+            .execute(&pool)
+            .await
+            .unwrap();
+            for (seq, n) in seq_payloads.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO ops (vault_id, seq, op_id, note_id, payload) \
+                     VALUES (?, ?, ?, x'01', ?)",
+                )
+                .bind(vec![id; 16])
+                .bind(seq as i64 + 1)
+                .bind(vec![seq as u8; 16])
+                .bind(vec![0u8; *n])
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            if let Some(n) = snapshot {
+                sqlx::query(
+                    "INSERT INTO snapshots (vault_id, note_id, covers, payload) \
+                     VALUES (?, x'01', 1, ?)",
+                )
+                .bind(vec![id; 16])
+                .bind(vec![0u8; n])
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+        }
+
+        migrate(&pool).await.unwrap();
+        let usage: Vec<(Vec<u8>, i64, i64)> =
+            sqlx::query_as("SELECT vault_id, used_bytes, quota_bytes FROM vaults ORDER BY 1")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let usage: Vec<(u8, i64, i64)> = usage.into_iter().map(|(v, u, q)| (v[0], u, q)).collect();
+        assert_eq!(
+            usage,
+            [
+                (1, 15, 104_857_600),
+                (2, 11, 104_857_600),
+                (3, 0, 104_857_600)
+            ]
+        );
     }
 
     #[tokio::test]

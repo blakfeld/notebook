@@ -26,6 +26,7 @@ use super::sessions::{self, AuthSession, Issued};
 use super::store::{self, CreateError};
 use super::{MAX_DEVICE_NAME_CHARS, Pending, ct_eq};
 use crate::app::AppState;
+use crate::invites;
 use crate::rate_limit::too_many_requests;
 
 type Result<T, E = ApiError> = std::result::Result<T, E>;
@@ -97,11 +98,27 @@ fn pending_full<T>(_: T) -> ApiError {
 
 // --- registration ---
 
+fn invalid_invite() -> ApiError {
+    fail("invalid invite", ApiError::INVALID_INVITE)
+}
+
+/// Checked first by both registration steps, before the username is parsed
+/// or any OPAQUE work is done, so a caller without a valid code learns
+/// nothing about usernames. Every invalid code fails the same way.
+async fn check_invite(state: &AppState, code: &str) -> Result<()> {
+    let mut conn = state.pool.acquire().await?;
+    if invites::check(&mut conn, code, state.auth.now()).await? {
+        Ok(())
+    } else {
+        Err(invalid_invite())
+    }
+}
+
 pub async fn register_start(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>> {
-    state.auth.policy.check()?;
+    check_invite(&state, &req.invite_code).await?;
     let username = username(&req.username)?;
     Ok(Json(RegisterStartResponse {
         registration_response: registration_response(&state, &req.registration_request, &username)?,
@@ -112,7 +129,7 @@ pub async fn register_finish(
     State(state): State<AppState>,
     ApiJson(req): ApiJson<RegisterFinishRequest>,
 ) -> Result<Json<Session>> {
-    state.auth.policy.check()?;
+    check_invite(&state, &req.invite_code).await?;
     let username = username(&req.username)?;
     check_device_name(&req.device_name)?;
     let record = opaque_record(&req.registration_upload)?;
@@ -124,9 +141,14 @@ pub async fn register_finish(
         .map_err(bad_request("recovery verifier"))?;
 
     let now = state.auth.now();
-    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
-    state.auth.policy.admit(&mut tx, &req).await?;
     let user_id = store::new_user_id(now);
+    // The write lock from `BEGIN IMMEDIATE` serializes concurrent finishes,
+    // so only one can consume the code; if creating the account fails
+    // below, the rollback leaves the invite redeemable.
+    let mut tx = state.pool.begin_with("BEGIN IMMEDIATE").await?;
+    if !invites::consume(&mut tx, &req.invite_code, &user_id, now).await? {
+        return Err(invalid_invite());
+    }
     let account = store::NewAccount {
         user_id,
         username: username.as_str(),
@@ -137,7 +159,7 @@ pub async fn register_finish(
         key_bundle: &req.key_bundle,
         now,
     };
-    match store::create_account(&mut tx, &account).await {
+    match store::create_account(&mut tx, &account, state.config.default_quota()).await {
         Ok(()) => {}
         Err(CreateError::UsernameTaken) => {
             return Err(fail("username taken", ApiError::USERNAME_TAKEN));

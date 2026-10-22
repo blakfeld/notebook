@@ -37,6 +37,7 @@ async fn add_vault(pool: &SqlitePool, user: u8, vault: [u8; 16]) {
             key_bundle: b"b",
             now: 0,
         },
+        100 * 1024 * 1024,
     )
     .await
     .unwrap();
@@ -368,6 +369,156 @@ async fn purge_removes_data_and_leaves_a_tombstone() {
         purge(&f.pool, &VAULT, note(99)).await.unwrap_err(),
         SyncError::UNKNOWN_NOTE
     );
+}
+
+// --- quota ---
+
+async fn set_quota(pool: &SqlitePool, vault: [u8; 16], quota: i64) {
+    sqlx::query("UPDATE vaults SET quota_bytes = ? WHERE vault_id = ?")
+        .bind(quota)
+        .bind(vault.as_slice())
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+async fn used(pool: &SqlitePool, vault: [u8; 16]) -> i64 {
+    sqlx::query_scalar("SELECT used_bytes FROM vaults WHERE vault_id = ?")
+        .bind(vault.as_slice())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// The vault's payload bytes, recomputed from what is stored.
+async fn stored(pool: &SqlitePool, vault: [u8; 16]) -> i64 {
+    sqlx::query_scalar(
+        "SELECT (SELECT coalesce(sum(length(payload)), 0) FROM ops WHERE vault_id = ?1) \
+              + (SELECT coalesce(sum(length(payload)), 0) FROM snapshots WHERE vault_id = ?1)",
+    )
+    .bind(vault.as_slice())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn pushes_over_quota_store_nothing() {
+    let f = fixture().await;
+    set_quota(&f.pool, VAULT, 100).await;
+    f.push(&[upd(1, 1, &[0; 60])]).await.unwrap();
+    assert_eq!(used(&f.pool, VAULT).await, 60);
+    for over in [
+        vec![upd(2, 2, &[0; 41])],
+        vec![keyless(2, 1, &[0; 20]), upd(3, 2, &[0; 21])],
+    ] {
+        assert_eq!(f.push(&over).await.unwrap_err(), SyncError::QUOTA_EXCEEDED);
+    }
+    assert_eq!(f.head().await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM ops").await, 1);
+    assert_eq!(f.count("SELECT count(*) FROM sync_notes").await, 1);
+    assert_eq!(used(&f.pool, VAULT).await, 60);
+
+    // Exactly to the quota is allowed; a retry adds nothing.
+    let at = f.push(&[keyless(2, 1, &[0; 40])]).await.unwrap();
+    assert_eq!(used(&f.pool, VAULT).await, 100);
+    let retry = f.push(&[keyless(2, 1, &[0; 40])]).await.unwrap();
+    assert_eq!(retry.seqs, at.seqs);
+    assert_eq!(used(&f.pool, VAULT).await, 100);
+}
+
+#[tokio::test]
+async fn compaction_and_purge_work_at_or_over_quota() {
+    let f = fixture().await;
+    f.push(&[
+        upd(1, 1, &[0; 60]),
+        keyless(2, 1, &[0; 40]),
+        upd(3, 2, &[0; 10]),
+    ])
+    .await
+    .unwrap();
+    set_quota(&f.pool, VAULT, 110).await;
+
+    // Covering only the first update with a larger snapshot grows the vault.
+    assert_eq!(
+        snapshot(&f.pool, &VAULT, note(1), 1, &[0; 70])
+            .await
+            .unwrap_err(),
+        SyncError::QUOTA_EXCEEDED
+    );
+    assert_eq!(note_seqs(&f, 1).await, [1, 2]);
+    assert_eq!(f.count("SELECT count(*) FROM snapshots").await, 0);
+    assert_eq!(used(&f.pool, VAULT).await, 110);
+
+    // Covering both shrinks it, at quota.
+    let delta = snapshot(&f.pool, &VAULT, note(1), 2, &[0; 30])
+        .await
+        .unwrap();
+    assert_eq!(delta, -70);
+    assert_eq!(used(&f.pool, VAULT).await, 40);
+
+    // Lowered below usage: growth is refused, purges are not.
+    set_quota(&f.pool, VAULT, 10).await;
+    assert_eq!(
+        f.push(&[keyless(4, 2, b"x")]).await.unwrap_err(),
+        SyncError::QUOTA_EXCEEDED
+    );
+    assert_eq!(purge(&f.pool, &VAULT, note(1)).await.unwrap().delta, -30);
+    assert_eq!(used(&f.pool, VAULT).await, 10);
+    f.push(&[keyless(4, 2, b"")]).await.unwrap();
+    assert_eq!(
+        f.push(&[keyless(5, 2, b"x")]).await.unwrap_err(),
+        SyncError::QUOTA_EXCEEDED
+    );
+}
+
+#[tokio::test]
+async fn usage_stays_exact_across_vaults() {
+    let f = fixture().await;
+    const OTHER: [u8; 16] = [3; 16];
+    add_vault(&f.pool, 2, OTHER).await;
+    let check = || async {
+        for vault in [VAULT, OTHER] {
+            assert_eq!(used(&f.pool, vault).await, stored(&f.pool, vault).await);
+        }
+    };
+    for (i, vault) in [VAULT, OTHER].into_iter().enumerate() {
+        let i = i as u128 * 100;
+        push(
+            &f.pool,
+            &vault,
+            &[upd(i + 1, 1, b"aaaa"), upd(i + 2, 2, b"bbbbbbbb")],
+            MAX,
+        )
+        .await
+        .unwrap();
+        check().await;
+        push(&f.pool, &vault, &[keyless(i + 3, 1, b"cc")], MAX)
+            .await
+            .unwrap();
+        // A retry stores nothing new.
+        push(&f.pool, &vault, &[keyless(i + 3, 1, b"cc")], MAX)
+            .await
+            .unwrap();
+        check().await;
+        snapshot(&f.pool, &vault, note(1), 1, b"s1").await.unwrap();
+        check().await;
+        // Replaces the first snapshot and compacts the rest of note 1.
+        snapshot(&f.pool, &vault, note(1), 3, b"snapshot-3")
+            .await
+            .unwrap();
+        check().await;
+        push(&f.pool, &vault, &[keyless(i + 4, 2, b"dddd")], MAX)
+            .await
+            .unwrap();
+        check().await;
+    }
+    purge(&f.pool, &VAULT, note(2)).await.unwrap();
+    check().await;
+    purge(&f.pool, &OTHER, note(1)).await.unwrap();
+    check().await;
+    assert_eq!(used(&f.pool, VAULT).await, 10);
+    assert_eq!(used(&f.pool, OTHER).await, 12);
 }
 
 // --- changes ---

@@ -113,7 +113,7 @@ Recovery start requests SHALL be limited per client address (burst 5, refilling 
 - **THEN** the third gets `429`
 
 ### Requirement: Auth errors are uniform JSON
-Every error returned by an `/auth` endpoint handler (as opposed to the shared rate-limit, size, and timeout layers) SHALL be a JSON object with a single `error` field holding a snake_case code (`invalid_request`, `invalid_username`, `invalid_credentials`, `invalid_token`, `session_ended`, `username_taken`, `invalid_invite`), and SHALL NOT include internal details.
+Every error returned by an `/auth` endpoint handler (as opposed to the shared rate-limit, size, and timeout layers) SHALL be a JSON object with a single `error` field holding a snake_case code (`invalid_request`, `invalid_username`, `invalid_credentials`, `invalid_token`, `session_ended`, `username_taken`, `invalid_invite`, `not_found`, `unavailable`, `internal`), and SHALL NOT include internal details.
 
 #### Scenario: Error body
 - **WHEN** a login finish fails because of a wrong passphrase

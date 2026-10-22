@@ -76,6 +76,7 @@ impl Harness {
                 key_bundle: b"b",
                 now: issued_at,
             },
+            100 * 1024 * 1024,
         )
         .await
         .unwrap();
@@ -261,6 +262,43 @@ async fn success_paths() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (status, _) = h.purge(&t, &n).await;
     assert_eq!(status, StatusCode::NO_CONTENT, "idempotent");
+}
+
+#[tokio::test]
+async fn quota_is_enforced_over_http() {
+    let h = harness().await;
+    let t = h.account(1).await;
+    let vault = [101u8; 16];
+    sqlx::query("UPDATE vaults SET quota_bytes = 100 WHERE vault_id = ?")
+        .bind(vault.as_slice())
+        .execute(&h.state.pool)
+        .await
+        .unwrap();
+    let mut live = h.state.sync.hub(&vault).subscribe();
+    let (status, _) = h.push(&t, vec![upd(1, 1, &[1; 60])]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(live.try_recv().is_ok());
+
+    let reply = h.push(&t, vec![keyless(2, 1, &[2; 50])]).await;
+    assert_eq!(reply.0, StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(reply.1, r#"{"error":"quota_exceeded"}"#);
+    assert!(live.try_recv().is_err(), "not relayed");
+    let (_, body) = h.changes(&t, "?after=0").await;
+    let page: ChangesResponse = serde_json::from_slice(&body).unwrap();
+    assert_eq!(page.entries.len(), 1, "not stored");
+
+    let (status, _) = h.push(&t, vec![keyless(2, 1, &[2; 40])]).await;
+    assert_eq!(status, StatusCode::OK, "up to the quota");
+    let n = note(1).to_string();
+    expect_error(
+        h.snapshot(&t, &n, "?covers=1", vec![3; 70]).await,
+        StatusCode::INSUFFICIENT_STORAGE,
+        ErrorCode::QuotaExceeded,
+    );
+    let (status, _) = h.snapshot(&t, &n, "?covers=2", vec![3; 30]).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "compacting at quota");
+    let (status, _) = h.purge(&t, &n).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 #[tokio::test]

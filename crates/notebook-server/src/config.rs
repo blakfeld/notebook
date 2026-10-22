@@ -29,12 +29,24 @@ pub struct Config {
     pub rate_limit_burst: NonZeroU32,
     /// The largest accepted encrypted update, in bytes.
     pub sync_max_update_bytes: NonZeroUsize,
+    /// The storage quota given to each new vault, in bytes.
+    pub default_vault_quota_bytes: NonZeroU64,
+    /// Burst of the per-address limit shared by registration start and
+    /// finish.
+    pub registration_rate_limit_burst: NonZeroU32,
+    /// Refill rate of that limit, in requests per minute.
+    pub registration_rate_limit_per_minute: NonZeroU32,
     pub log_format: LogFormat,
     /// A `tracing` filter directive, such as `info` or `notebook_server=debug`.
     pub log_level: String,
 }
 
 impl Config {
+    /// [`Self::default_vault_quota_bytes`] as stored in SQLite.
+    pub fn default_quota(&self) -> i64 {
+        i64::try_from(self.default_vault_quota_bytes.get()).unwrap_or(i64::MAX)
+    }
+
     /// True when `public_url` uses `https`, so HSTS applies.
     pub fn is_https(&self) -> bool {
         self.public_url.starts_with("https://")
@@ -146,6 +158,18 @@ impl Config {
             sync_max_update_bytes: env_value(&env, "sync_max_update_bytes")?
                 .or(file.sync_max_update_bytes)
                 .unwrap_or(NonZeroUsize::new(256 * 1024).unwrap()),
+            default_vault_quota_bytes: env_value(&env, "default_vault_quota_bytes")?
+                .or(file.default_vault_quota_bytes)
+                .unwrap_or(NonZeroU64::new(100 * 1024 * 1024).unwrap()),
+            registration_rate_limit_burst: env_value(&env, "registration_rate_limit_burst")?
+                .or(file.registration_rate_limit_burst)
+                .unwrap_or(NonZeroU32::new(5).unwrap()),
+            registration_rate_limit_per_minute: env_value(
+                &env,
+                "registration_rate_limit_per_minute",
+            )?
+            .or(file.registration_rate_limit_per_minute)
+            .unwrap_or(NonZeroU32::new(1).unwrap()),
             log_format: env_value(&env, "log_format")?
                 .or(file.log_format)
                 .unwrap_or(LogFormat::Text),
@@ -220,6 +244,9 @@ struct FileConfig {
     rate_limit_per_second: Option<NonZeroU32>,
     rate_limit_burst: Option<NonZeroU32>,
     sync_max_update_bytes: Option<NonZeroUsize>,
+    default_vault_quota_bytes: Option<NonZeroU64>,
+    registration_rate_limit_burst: Option<NonZeroU32>,
+    registration_rate_limit_per_minute: Option<NonZeroU32>,
     log_format: Option<LogFormat>,
     log_level: Option<String>,
 }
@@ -411,6 +438,55 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("NOTEBOOK_SYNC_MAX_UPDATE_BYTES"), "{err}");
+    }
+
+    #[test]
+    fn quota_and_registration_limit_settings() {
+        let config = load(None, &[URL]).unwrap();
+        assert_eq!(config.default_vault_quota_bytes.get(), 104_857_600);
+        assert_eq!(config.registration_rate_limit_burst.get(), 5);
+        assert_eq!(config.registration_rate_limit_per_minute.get(), 1);
+
+        let file = "public_url = \"http://localhost\"\ndefault_vault_quota_bytes = 1000\n\
+                    registration_rate_limit_burst = 2\nregistration_rate_limit_per_minute = 3\n";
+        let config = load(Some(file), &[]).unwrap();
+        assert_eq!(config.default_vault_quota_bytes.get(), 1000);
+        assert_eq!(config.registration_rate_limit_burst.get(), 2);
+        assert_eq!(config.registration_rate_limit_per_minute.get(), 3);
+        let config = load(
+            Some(file),
+            &[
+                ("NOTEBOOK_DEFAULT_VAULT_QUOTA_BYTES", "52428800"),
+                ("NOTEBOOK_REGISTRATION_RATE_LIMIT_BURST", "7"),
+                ("NOTEBOOK_REGISTRATION_RATE_LIMIT_PER_MINUTE", "9"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(config.default_vault_quota_bytes.get(), 52_428_800);
+        assert_eq!(config.registration_rate_limit_burst.get(), 7);
+        assert_eq!(config.registration_rate_limit_per_minute.get(), 9);
+
+        for var in [
+            "NOTEBOOK_DEFAULT_VAULT_QUOTA_BYTES",
+            "NOTEBOOK_REGISTRATION_RATE_LIMIT_BURST",
+            "NOTEBOOK_REGISTRATION_RATE_LIMIT_PER_MINUTE",
+        ] {
+            for bad in ["lots", "0"] {
+                let err = load(None, &[URL, (var, bad)]).unwrap_err().to_string();
+                assert!(err.contains(var), "{err}");
+            }
+        }
+    }
+
+    #[test]
+    fn deployment_sample_loads() {
+        let doc = include_str!("../../../docs/deployment.md");
+        let start = doc.find("```toml\n").expect("sample config") + "```toml\n".len();
+        let sample = &doc[start..start + doc[start..].find("```").unwrap()];
+        let config = load(Some(sample), &[]).unwrap();
+        assert_eq!(config.default_vault_quota_bytes.get(), 104_857_600);
+        assert_eq!(config.registration_rate_limit_burst.get(), 5);
+        assert_eq!(config.registration_rate_limit_per_minute.get(), 1);
     }
 
     #[test]

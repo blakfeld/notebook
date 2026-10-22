@@ -96,6 +96,7 @@ impl TransportError {
             ErrorCode::UpdateTooLarge => Self::UpdateTooLarge,
             ErrorCode::MissingNoteKey => Self::MissingNoteKey,
             ErrorCode::RateLimited => Self::RateLimited { retry_after: None },
+            ErrorCode::QuotaExceeded => Self::QuotaExceeded,
             ErrorCode::Internal => Self::Server(status.max(500)),
         }
     }

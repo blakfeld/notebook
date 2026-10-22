@@ -388,6 +388,7 @@ mod tests {
                 key_bundle: b"b",
                 now: T0,
             },
+            100 * 1024 * 1024,
         )
         .await
         .unwrap();

@@ -334,6 +334,9 @@ pub enum ErrorCode {
     MissingNoteKey,
     /// `429`: too many pushes over the live channel; retry later.
     RateLimited,
+    /// `507`: the write would put the vault over its storage quota. Clears
+    /// only when usage drops or the quota is raised.
+    QuotaExceeded,
     /// `500`: a server-side failure; details are only in the server log.
     Internal,
 }
@@ -556,6 +559,7 @@ mod tests {
             (ErrorCode::UpdateTooLarge, "update_too_large"),
             (ErrorCode::MissingNoteKey, "missing_note_key"),
             (ErrorCode::RateLimited, "rate_limited"),
+            (ErrorCode::QuotaExceeded, "quota_exceeded"),
             (ErrorCode::Internal, "internal"),
         ];
         for (code, text) in codes {

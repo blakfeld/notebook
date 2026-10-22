@@ -59,6 +59,13 @@ rate_limit_burst = 100
 # max_body_bytes instead.
 sync_max_update_bytes = 262144
 
+# Storage quota for each new vault (100 MiB). Existing vaults keep theirs;
+# change one with `user quota`.
+default_vault_quota_bytes = 104857600
+# Registration start and finish share one per-address bucket.
+registration_rate_limit_burst = 5
+registration_rate_limit_per_minute = 1
+
 log_format = "json"
 log_level = "info"
 ```
@@ -76,6 +83,9 @@ log_level = "info"
 | `rate_limit_per_second` | `20` | `NOTEBOOK_RATE_LIMIT_PER_SECOND` |
 | `rate_limit_burst` | `100` | `NOTEBOOK_RATE_LIMIT_BURST` |
 | `sync_max_update_bytes` | `262144` | `NOTEBOOK_SYNC_MAX_UPDATE_BYTES` |
+| `default_vault_quota_bytes` | `104857600` | `NOTEBOOK_DEFAULT_VAULT_QUOTA_BYTES` |
+| `registration_rate_limit_burst` | `5` | `NOTEBOOK_REGISTRATION_RATE_LIMIT_BURST` |
+| `registration_rate_limit_per_minute` | `1` | `NOTEBOOK_REGISTRATION_RATE_LIMIT_PER_MINUTE` |
 | `log_format` | `text` | `NOTEBOOK_LOG_FORMAT` (`text` or `json`) |
 | `log_level` | `info` | `NOTEBOOK_LOG_LEVEL` (a `tracing` filter) |
 
@@ -91,17 +101,60 @@ IPv6 clients are limited per /64, with additional shared limits for each /56
 ```sh
 notebook-server --config /etc/notebook/notebook.toml migrate   # apply migrations, exit
 notebook-server --config /etc/notebook/notebook.toml serve     # migrate, then serve
+
+notebook-server invite create [--expires 7d] [--note TEXT]     # print a new invite code
+notebook-server invite list [--all]                            # active (or all) invites
+notebook-server invite revoke <ID>                             # revoke an active invite
+notebook-server user add <USERNAME>                            # create an account directly
+notebook-server user quota <USERNAME> [SIZE]                   # show or set a vault quota
 ```
 
 `serve` stops accepting connections on `SIGTERM` or `SIGINT`, gives in-flight
 requests up to 10 seconds, closes the database, and exits 0. `GET /healthz`
 answers `200` when the database is reachable and `503` when it is not.
 
+The `invite` and `user` commands open the database directly and apply pending
+migrations first, so they work whether or not `serve` is running. Run them as
+the service user, so any file they create belongs to it. Times are shown in
+UTC.
+
 ## Accounts
 
-Registration over HTTP is closed until invite codes exist, so the operator
-creates accounts. Run this as the service user, so the database and key file
-it may create belong to it:
+Anyone with an invite code can register from a client; nobody can without
+one. To onboard someone, create a code and send it to them:
+
+```sh
+sudo -u notebook notebook-server --config /etc/notebook/notebook.toml \
+  invite create --expires 3d --note "for alice"
+```
+
+```text
+7KQ2M-XW9PD-0RT4H-C6NBJ
+Invite 9X4T2QKM expires 2026-10-25T18:00:00Z.
+```
+
+Only the code goes to stdout (the second line is stderr), so
+`code=$(notebook-server invite create)` captures it. The code is shown once,
+stored only as a hash, and works for one registration. It expires after 7 days
+unless `--expires` says otherwise (`30m`, `12h`, `3d`; at most `365d`). Users
+may type it in any case and without the dashes.
+
+`invite list` shows active invites; `--all` adds used, expired, and revoked
+ones, and who redeemed each:
+
+```text
+9X4T2QKM  created 2026-10-22T18:00:00Z  expires 2026-10-25T18:00:00Z  used by alice at 2026-10-22T19:12:40Z  note "for alice"
+```
+
+`invite revoke 9X4T2QKM` stops an unused code from working. Revoking a used,
+expired, or already revoked invite exits non-zero and changes nothing.
+
+Registration start and finish share a per-address limit
+(`registration_rate_limit_burst`, `registration_rate_limit_per_minute`), and
+every invalid code (unknown, mistyped, expired, revoked, used) gets the same
+`403 {"error":"invalid_invite"}`.
+
+The operator can also create an account directly, with no invite:
 
 ```sh
 sudo -u notebook notebook-server --config /etc/notebook/notebook.toml user add alice
@@ -129,6 +182,25 @@ key** once. Give it to the user to keep somewhere safe: it is the only way back
 in if they forget their passphrase, and the server can't reset passwords or
 read notes. The user then signs in from any client with the username and
 passphrase.
+
+### Storage quotas
+
+Each vault may store up to its quota of encrypted note data (updates and
+snapshots, counted by payload size). New vaults, whether registered or created
+with `user add`, get `default_vault_quota_bytes` (100 MiB); changing that
+setting leaves existing vaults alone. A write that would go over the quota
+fails with `507 {"error":"quota_exceeded"}` and stores nothing; deleting,
+purging, and compacting notes always work.
+
+```sh
+$ notebook-server user quota alice
+alice: 1843200 of 104857600 bytes used
+$ notebook-server user quota alice 1GiB
+alice: 1843200 of 1073741824 bytes used
+```
+
+Sizes are bytes or a number with `KiB`, `MiB`, or `GiB`. A quota below current
+usage is allowed: it blocks growth until the user deletes enough.
 
 ## The OPAQUE key file
 
