@@ -1,5 +1,4 @@
 import { syntaxTree } from '@codemirror/language'
-import type { Range } from '@codemirror/state'
 import {
   Decoration,
   type DecorationSet,
@@ -152,10 +151,14 @@ const CODE_NODES = new Set(['InlineCode', 'FencedCode', 'CodeBlock'])
 
 const tagMark = Decoration.mark({ class: 'cm-tag' })
 
-function tagDecorations(view: EditorView): DecorationSet {
+/**
+ * Every tag occurrence in the visible lines, as `[from, to)` document
+ * offsets in order. Text in code never holds a tag.
+ */
+export function visibleTagRanges(view: EditorView): [number, number][] {
   const { state } = view
   const tree = syntaxTree(state)
-  const marks: Range<Decoration>[] = []
+  const found: [number, number][] = []
   let lastLine = 0
   for (const visible of view.visibleRanges) {
     let pos = visible.from
@@ -177,11 +180,17 @@ function tagDecorations(view: EditorView): DecorationSet {
         },
       })
       for (const [from, to] of findTagRanges(line.text, excluded)) {
-        marks.push(tagMark.range(line.from + from, line.from + to))
+        found.push([line.from + from, line.from + to])
       }
     }
   }
-  return Decoration.set(marks)
+  return found
+}
+
+function tagDecorations(view: EditorView): DecorationSet {
+  return Decoration.set(
+    visibleTagRanges(view).map(([from, to]) => tagMark.range(from, to)),
+  )
 }
 
 /** Marks every tag occurrence in the visible lines with `cm-tag`. */
@@ -207,6 +216,5 @@ export const tagHighlighter = ViewPlugin.fromClass(
 )
 
 export const tagTheme = EditorView.baseTheme({
-  '.cm-tag': { color: '#0969da' },
-  '&dark .cm-tag': { color: '#4493f8' },
+  '.cm-tag': { color: 'var(--tag-fg)' },
 })

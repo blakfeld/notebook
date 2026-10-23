@@ -53,6 +53,7 @@ export function tauriCore(): CoreApi {
 
     getSettings: () => call('get_settings'),
     setVimMode: (on) => call('set_vim_mode', { on }),
+    setPreference: (key, value) => call('set_preference', { key, value }),
     setTagExpanded: (path, expanded) =>
       call('set_tag_expanded', { path, expanded }),
 

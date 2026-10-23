@@ -3,7 +3,7 @@ import { EditorSelection } from '@codemirror/state'
 import type { EditorView } from '@codemirror/view'
 import { memorySettings } from '../platform/settings'
 import { memoryBridge } from './memoryBridge'
-import { createNoteEditor } from './noteEditor'
+import { createNoteEditor, type NoteEditorOptions } from './noteEditor'
 
 // jsdom has no layout. CodeMirror measures ranges, which jsdom lacks.
 if (typeof Range !== 'undefined' && !Range.prototype.getClientRects) {
@@ -12,9 +12,17 @@ if (typeof Range !== 'undefined' && !Range.prototype.getClientRects) {
   Range.prototype.getClientRects = () =>
     Object.assign([], { item: () => null }) as unknown as DOMRectList
 }
+// jsdom reports Apple's vendor string, so CodeMirror applies a Safari
+// selection workaround on pointer selection that needs `execCommand`.
+if (typeof document !== 'undefined' && !document.execCommand) {
+  document.execCommand = () => false
+}
 
 /** An editor on a memory bridge, with `notes` and nothing open yet. */
-export function setup(notes: Record<string, string> = {}) {
+export function setup(
+  notes: Record<string, string> = {},
+  options: Partial<NoteEditorOptions> = {},
+) {
   const bridge = memoryBridge(notes)
   const settings = memorySettings()
   const errors: unknown[] = []
@@ -24,6 +32,7 @@ export function setup(notes: Record<string, string> = {}) {
     bridge,
     settings,
     onError: (error) => errors.push(error),
+    ...options,
   })
   return { bridge, settings, errors, parent, editor, view: editor.view }
 }

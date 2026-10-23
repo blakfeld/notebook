@@ -212,6 +212,10 @@ impl From<&Changed> for VaultChangedDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SettingsDto {
     pub vim_mode: bool,
+    /// `system`, `light`, or `dark`.
+    pub theme: String,
+    pub source_view: bool,
+    pub focus_mode: bool,
     /// Tag paths (lowercased) the user collapsed in the sidebar.
     pub collapsed_tags: Vec<String>,
 }

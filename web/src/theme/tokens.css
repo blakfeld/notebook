@@ -1,0 +1,109 @@
+/*
+ * Color tokens for the whole app, editor included. `theme.ts` sets
+ * `data-theme` on the root element; before it does, the OS preference picks
+ * the set, so System users are right from the first frame.
+ *
+ * The two `:root:not([data-theme])` blocks repeat the explicit sets (CSS
+ * can't share them), and `theme.test.ts` checks they match. It also checks
+ * every pair against the contrast the `appearance` spec requires, so keep
+ * colors as hex. Only `--selection` and `--active-line` are translucent.
+ */
+
+:root:not([data-theme]),
+:root[data-theme='light'] {
+  color-scheme: light;
+  --text: #1f2328;
+  --muted: #59636e;
+  --bg: #ffffff;
+  --surface: #f6f8fa;
+  --border: #d1d9e0;
+  --control: #818b98;
+  --hover: #eff2f5;
+  --selected: #dbe9fb;
+  --accent: #0969da;
+  --accent-text: #ffffff;
+  --danger: #cf222e;
+  --warning: #9a6700;
+  --focus: #0969da;
+  --link: #0969da;
+  --tag-bg: #ddf4ff;
+  --tag-fg: #0550ae;
+  --code-bg: #f6f8fa;
+  --code-text: #1f2328;
+  --syntax-marker: #818b98;
+  --dim: #818b98;
+  --selection: rgba(9, 105, 218, 0.2);
+  --active-line: rgba(31, 35, 40, 0.035);
+  --hl-keyword: #cf222e;
+  --hl-string: #0a3069;
+  --hl-comment: #59636e;
+  --hl-number: #0550ae;
+  --hl-function: #6639ba;
+  --hl-type: #953800;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --text: #e6edf3;
+  --muted: #9198a1;
+  --bg: #0d1117;
+  --surface: #151b23;
+  --border: #3d444d;
+  --control: #6e7681;
+  --hover: #212830;
+  --selected: #1f3a5f;
+  --accent: #4493f8;
+  --accent-text: #0d1117;
+  --danger: #f85149;
+  --warning: #d29922;
+  --focus: #4493f8;
+  --link: #4493f8;
+  --tag-bg: #132a46;
+  --tag-fg: #79c0ff;
+  --code-bg: #151b23;
+  --code-text: #e6edf3;
+  --syntax-marker: #6e7681;
+  --dim: #6e7681;
+  --selection: rgba(68, 147, 248, 0.35);
+  --active-line: rgba(230, 237, 243, 0.04);
+  --hl-keyword: #ff7b72;
+  --hl-string: #a5d6ff;
+  --hl-comment: #9198a1;
+  --hl-number: #79c0ff;
+  --hl-function: #d2a8ff;
+  --hl-type: #ffa657;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --text: #e6edf3;
+    --muted: #9198a1;
+    --bg: #0d1117;
+    --surface: #151b23;
+    --border: #3d444d;
+    --control: #6e7681;
+    --hover: #212830;
+    --selected: #1f3a5f;
+    --accent: #4493f8;
+    --accent-text: #0d1117;
+    --danger: #f85149;
+    --warning: #d29922;
+    --focus: #4493f8;
+    --link: #4493f8;
+    --tag-bg: #132a46;
+    --tag-fg: #79c0ff;
+    --code-bg: #151b23;
+    --code-text: #e6edf3;
+    --syntax-marker: #6e7681;
+    --dim: #6e7681;
+    --selection: rgba(68, 147, 248, 0.35);
+    --active-line: rgba(230, 237, 243, 0.04);
+    --hl-keyword: #ff7b72;
+    --hl-string: #a5d6ff;
+    --hl-comment: #9198a1;
+    --hl-number: #79c0ff;
+    --hl-function: #d2a8ff;
+    --hl-type: #ffa657;
+  }
+}
