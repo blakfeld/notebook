@@ -1,14 +1,14 @@
 <script lang="ts">
-  import type { Account, CoreApi, Phase } from '../../platform'
+  import type { CoreApi, Phase } from '../../platform'
   import { errorMessage } from '../errors'
+  import StartOver from './StartOver.svelte'
 
   interface Props {
     core: CoreApi
-    account: Account | null
     onPhase: (phase: Phase) => void
   }
 
-  let { core, account, onPhase }: Props = $props()
+  let { core, onPhase }: Props = $props()
 
   let passphrase = $state('')
   let error = $state('')
@@ -20,9 +20,9 @@
     busy = true
     error = ''
     try {
-      const phase = await core.unlock(passphrase)
+      const next = await core.upgradeWithPassphrase(passphrase)
       passphrase = ''
-      onPhase(phase)
+      onPhase(next)
     } catch (err) {
       error = errorMessage(err)
     } finally {
@@ -31,12 +31,13 @@
   }
 </script>
 
-<div class="account-page">
-  <form class="account-form" onsubmit={submit} aria-labelledby="unlock-title">
-    <h1 id="unlock-title">Notebook is locked</h1>
-    {#if account}
-      <p class="hint">{account.username} on {account.server}</p>
-    {/if}
+<div class="setup-form">
+  <form class="setup-form" onsubmit={submit} aria-labelledby="upgrade-title">
+    <h1 id="upgrade-title">Notebook no longer uses a server</h1>
+    <p class="hint">
+      Your notes now stay on this computer. To keep the ones already here, enter
+      the passphrase you used to sign in. Notebook asks for it this once.
+    </p>
     <label class="field">
       Passphrase
       <!-- svelte-ignore a11y_autofocus -->
@@ -45,6 +46,7 @@
         autocomplete="current-password"
         required
         autofocus
+        aria-invalid={error ? 'true' : undefined}
         bind:value={passphrase}
       />
     </label>
@@ -52,7 +54,8 @@
       <p class="form-error" role="alert">{error}</p>
     {/if}
     <button type="submit" class="primary" disabled={busy}>
-      {busy ? 'Unlocking…' : 'Unlock'}
+      {busy ? 'Checking…' : 'Continue'}
     </button>
   </form>
+  <StartOver {core} {onPhase} label="I can’t remember it" />
 </div>

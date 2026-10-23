@@ -58,7 +58,7 @@ impl AppState {
             return Ok(None);
         };
         // Read after the picker closes, so edits made meanwhile are in, and a
-        // vault locked meanwhile fails with `locked`.
+        // vault closed meanwhile fails with `not_open`.
         let notes = self.with_vault(|u| Ok(u.workspace.all_notes()))?;
         let plan = export::plan(&notes, ExportOptions { include_trashed }, now());
         drop(notes);

@@ -81,7 +81,7 @@ export class NotesState {
   /**
    * The note's entry from whichever view holds it (together they cover
    * every note), `null` if none does, or `undefined` if the core couldn't
-   * say (e.g. it locked meanwhile).
+   * say (e.g. the call failed).
    */
   async #find(id: string): Promise<ListEntry | null | undefined> {
     try {

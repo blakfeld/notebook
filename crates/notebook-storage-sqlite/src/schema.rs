@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 /// Migrations in order; applying entry `i` takes the store from layout
 /// version `i` to `i + 1`. Existing entries must never change; add new ones.
-pub(crate) const MIGRATIONS: &[&str] = &[V1];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
 
 const V1: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY NOT NULL) STRICT;
@@ -26,6 +26,14 @@ CREATE TABLE log (
 CREATE INDEX log_note ON log(note_id, pos);
 CREATE INDEX log_pending ON log(pos) WHERE is_pending = 1;
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+";
+
+/// The vault's recovery entry, one row at most.
+const V2: &str = "
+CREATE TABLE vault_meta (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    recovery_entry BLOB NOT NULL
+) STRICT;
 ";
 
 /// The store's layout version.

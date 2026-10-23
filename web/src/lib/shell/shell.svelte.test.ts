@@ -4,7 +4,6 @@ import { getCM } from '@replit/codemirror-vim'
 import { flushSync } from 'svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import '../../editor/testing'
-import type { SyncStatus } from '../../platform'
 import { FakeCoreApi, type SeedNote } from '../../platform/fake'
 import { coreSettings } from '../../platform/settings'
 import { createPreferences } from '../preferences'
@@ -21,7 +20,6 @@ import {
   settle,
 } from '../testing'
 import Shell from './Shell.svelte'
-import SyncIndicator from './SyncIndicator.svelte'
 
 const cleanups: (() => void)[] = []
 afterEach(() => {
@@ -33,11 +31,7 @@ async function shell(
   setup?: (core: FakeCoreApi) => void,
 ) {
   const core = new FakeCoreApi(notes)
-  core.phase = {
-    phase: 'unlocked',
-    account: { server: 'https://notes.example.com', username: 'alice' },
-    credentials_remembered: true,
-  }
+  core.phase = { phase: 'open', secure_store: true, upgrade: false }
   setup?.(core)
   const phase = new PhaseState(core)
   await phase.start()
@@ -45,7 +39,7 @@ async function shell(
   await preferences.load()
   const view = render(Shell, { core, phase, preferences })
   let mounted = true
-  // Unmounts the shell, as the app does when the vault locks.
+  // Unmounts the shell, as the app does when it closes.
   const destroy = () => {
     if (mounted) view.destroy()
     mounted = false
@@ -415,21 +409,18 @@ describe('note actions', () => {
     expect(titles(root)).toEqual([])
   })
 
-  it('says a connection is required to delete while offline', async () => {
+  it('deletes at once, with no connection involved', async () => {
     const { core, root } = await shell([{ id: 't', body: 'T', trashed: true }])
-    core.offline = true
     await selectView(root, 'Trash')
     click(button(contextMenu(root, 't'), 'Delete permanently…'))
     await settle()
-    click(
-      button(
-        document.querySelector<HTMLElement>('[role="dialog"]')!,
-        'Delete permanently',
-      ),
-    )
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(dialog.textContent).toMatch(/deleted from this device/)
+    expect(dialog.textContent).not.toMatch(/all your devices/)
+    click(button(dialog, 'Delete permanently'))
     await settle()
-    expect(alerts(root).join(' ')).toMatch(/needs a connection to the server/)
-    expect(core.has('t')).toBe(true)
+    expect(alerts(root)).toEqual([])
+    expect(core.has('t')).toBe(false)
   })
 
   it('creates a note under the selected tag and opens it', async () => {
@@ -449,19 +440,14 @@ describe('note actions', () => {
     expect(core.body(id)).toBe('#work/acme\n')
   })
 
-  it('handles Mod+N, Mod+Shift+F, and Mod+L', async () => {
-    const { core, phase, root } = await shell([{ id: 'a', body: 'A' }])
+  it('handles Mod+N and Mod+Shift+F', async () => {
+    const { core, root } = await shell([{ id: 'a', body: 'A' }])
     press('n', { ctrlKey: true })
     await settle()
     expect(core.callsTo('createNote')).toEqual([[{ view: 'notes' }]])
 
     press('F', { ctrlKey: true, shiftKey: true })
     expect(document.activeElement).toBe(field(root, 'Search notes'))
-
-    press('l', { ctrlKey: true })
-    await settle()
-    expect(core.callsTo('lock')).toHaveLength(1)
-    expect(phase.current?.phase).toBe('locked')
   })
 
   it('keeps Mod+Shift+F for search inside the editor; view keys don’t clash', async () => {
@@ -528,50 +514,14 @@ describe('pending edits are delivered first', () => {
     return opened
   }
 
-  it('locks only after the last edit reaches the core, leaving nothing open', async () => {
-    const { core, phase, root, destroy } = await editing()
-    press('l', { ctrlKey: true })
-    await settle()
-    expect(phase.current?.phase).toBe('locked')
-    expect(core.body('a')).toBe('start typed')
-    const methods = core.calls.map((c) => c.method)
-    expect(methods.lastIndexOf('editorPush')).toBeLessThan(
-      methods.indexOf('lock'),
-    )
-
-    // The app unmounts the shell on lock.
-    void root
+  it('leaves nothing attached once the shell unmounts', async () => {
+    const { core, destroy } = await editing()
     destroy()
     await settle()
     expect(core.listenerCount('editor-remote-update')).toBe(0)
     const pushes = core.callsTo('editorPush').length
     await new Promise((resolve) => setTimeout(resolve, 1200))
     expect(core.callsTo('editorPush')).toHaveLength(pushes)
-  })
-
-  it('locks from Settings after delivering edits', async () => {
-    const { core, phase, root } = await editing()
-    click(button(root, 'Settings'))
-    await settle()
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    click(button(dialog, `Lock ${'Ctrl+L'}`))
-    await settle()
-    expect(phase.current?.phase).toBe('locked')
-    expect(core.body('a')).toBe('start typed')
-  })
-
-  it('counts editor edits before warning about sign-out', async () => {
-    const { core, root } = await editing()
-    click(button(root, 'Settings'))
-    await settle()
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
-    click(button(dialog, 'Sign out'))
-    await settle()
-    const methods = core.calls.map((c) => c.method)
-    expect(methods.indexOf('editorPush')).toBeGreaterThanOrEqual(0)
-    expect(methods.indexOf('editorPush')).toBeLessThan(
-      methods.indexOf('pendingCount'),
-    )
   })
 
   it('trashes the open note after delivering its edits', async () => {
@@ -588,52 +538,12 @@ describe('pending edits are delivered first', () => {
   })
 })
 
-describe('SyncIndicator', () => {
-  function indicator(status: SyncStatus | null) {
-    const view = render(SyncIndicator, { status })
-    cleanups.push(view.destroy)
-    return view.target.textContent!.replace(/\s+/g, ' ').trim()
-  }
-
-  it('shows each sync state and the pending count when there is one', () => {
-    expect(indicator({ state: 'synced', pending: 0, attention: [] })).toBe(
-      'Synced',
-    )
-    expect(indicator({ state: 'syncing', pending: 1, attention: [] })).toBe(
-      'Syncing… · 1 pending',
-    )
-    expect(indicator({ state: 'offline', pending: 2, attention: [] })).toBe(
-      'Offline · 2 pending',
-    )
-  })
-
-  it('says when sign-in, an upgrade, or storage needs the user', () => {
-    expect(
-      indicator({
-        state: 'offline',
-        pending: 1,
-        attention: ['sign_in_required'],
-      }),
-    ).toMatch(/Sign in required to sync/)
-    expect(
-      indicator({
-        state: 'synced',
-        pending: 0,
-        attention: ['upgrade_required'],
-      }),
-    ).toMatch(/App upgrade required/)
-    expect(
-      indicator({ state: 'syncing', pending: 3, attention: ['quota_full'] }),
-    ).toMatch(/3 pending.*Storage full/)
-  })
-
-  it('follows sync-status events in the shell', async () => {
-    const { core, root } = await shell()
-    core.setSync({ state: 'offline', pending: 2, attention: [] })
-    await settle()
-    expect(root.querySelector('.sync')!.textContent).toMatch(
-      /Offline\s*· 2 pending/,
-    )
+describe('sidebar footer', () => {
+  it('keeps the status slot beside Settings, empty for now', async () => {
+    const { root } = await shell()
+    const footer = root.querySelector<HTMLElement>('.sidebar footer')!
+    expect(footer.querySelector('.status')!.textContent).toBe('')
+    expect(hasButton(footer, 'Settings')).toBe(true)
   })
 })
 
@@ -646,16 +556,43 @@ describe('Settings', () => {
     return { ...opened, dialog }
   }
 
-  it('shows the account and its actions', async () => {
-    const { dialog } = await openSettings()
-    expect(dialog.textContent).toMatch(/https:\/\/notes\.example\.com/)
-    expect(dialog.textContent).toMatch(/alice/)
-    expect(dialog.textContent).toMatch(/Signed in · Synced/)
-    for (const name of ['Change passphrase…', 'Sign out']) {
-      expect(hasButton(dialog, name)).toBe(true)
+  it('shows the vim toggle and the version, and nothing about accounts', async () => {
+    const { core, dialog } = await openSettings()
+    expect(field(dialog, 'Vim mode').type).toBe('checkbox')
+    const seen = [dialog.textContent!]
+
+    click(button(dialog, 'About'))
+    await settle()
+    expect(
+      dialog.querySelector('[data-testid="app-version"]')!.textContent!.trim(),
+    ).toBe(`v${core.version}`)
+    seen.push(dialog.textContent!)
+    click(button(dialog, 'Appearance'))
+    await settle()
+    seen.push(dialog.textContent!)
+
+    const tabs = [...dialog.querySelectorAll('[role="tab"]')].map((t) =>
+      t.textContent!.trim(),
+    )
+    expect(tabs).toEqual(['Appearance', 'Editor', 'Export', 'About'])
+    for (const text of seen) {
+      expect(text).not.toMatch(
+        /server|account|passphrase|lock|sign[- ]?out|sign[- ]?in|sync/i,
+      )
     }
-    expect(button(dialog, 'Lock Ctrl+L')).toBeTruthy()
-    expect(hasButton(dialog, 'Editor')).toBe(true)
+  })
+
+  it('says when the version can’t be read', async () => {
+    const { core, root } = await shell()
+    core.failNext('coreVersion', 'internal')
+    click(button(root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'About'))
+    await settle()
+    expect(
+      dialog.querySelector('[data-testid="app-version"]')!.textContent!.trim(),
+    ).toBe('Unknown')
   })
 
   it('applies vim mode to the open editor at once', async () => {
@@ -702,69 +639,6 @@ describe('Settings', () => {
     click(button(alert, 'Dismiss'))
     await settle()
     expect(document.querySelector('.shell [role="alert"]')).toBeNull()
-  })
-
-  it('warns how many changes sign-out loses and needs confirmation', async () => {
-    const { core, dialog, phase } = await openSettings()
-    core.syncState = { state: 'offline', pending: 3, attention: [] }
-    click(button(dialog, 'Sign out'))
-    await settle()
-    expect(dialog.textContent).toMatch(
-      /3 changes haven’t synced and will be lost/,
-    )
-    expect(core.callsTo('signOut')).toEqual([])
-
-    click(button(dialog, 'Sign out and lose changes'))
-    await settle()
-    expect(core.callsTo('signOut')).toEqual([[true]])
-    expect(phase.current?.phase).toBe('signed_out')
-  })
-
-  it('signs out at once when everything is synced', async () => {
-    const { core, dialog, phase } = await openSettings()
-    click(button(dialog, 'Sign out'))
-    await settle()
-    expect(core.callsTo('signOut')).toEqual([[false]])
-    expect(phase.current?.phase).toBe('signed_out')
-  })
-
-  it('locks', async () => {
-    const { core, dialog, phase } = await openSettings()
-    click(button(dialog, 'Lock Ctrl+L'))
-    await settle()
-    expect(core.callsTo('lock')).toHaveLength(1)
-    expect(phase.current?.phase).toBe('locked')
-  })
-
-  it('changes the passphrase, and says when that needs a connection', async () => {
-    const { core, dialog } = await openSettings()
-    click(button(dialog, 'Change passphrase…'))
-    fill(field(dialog, 'Current passphrase'), 'correct horse battery')
-    fill(field(dialog, 'New passphrase'), 'an even better one')
-    fill(field(dialog, 'New passphrase again'), 'an even better one')
-    core.offline = true
-    click(button(dialog, 'Change passphrase'))
-    await settle()
-    expect(alerts(dialog)[0]).toMatch(/needs a connection/)
-
-    core.offline = false
-    click(button(dialog, 'Change passphrase'))
-    await settle()
-    expect(core.account.passphrase).toBe('an even better one')
-    expect(dialog.textContent).toMatch(/Passphrase changed/)
-  })
-
-  it('offers sign-in when the session has ended', async () => {
-    const { core, dialog, root } = await openSettings()
-    click(button(dialog, 'Change passphrase…'))
-    fill(field(dialog, 'Current passphrase'), 'correct horse battery')
-    fill(field(dialog, 'New passphrase'), 'an even better one')
-    fill(field(dialog, 'New passphrase again'), 'an even better one')
-    core.failNext('changePassphrase', 'sign_in_required')
-    click(button(dialog, 'Change passphrase'))
-    await settle()
-    expect(alerts(dialog)[0]).toMatch(/session has ended/)
-    expect(root.textContent).toMatch(/Sign in to keep syncing/)
   })
 })
 
@@ -856,17 +730,6 @@ describe('Export', () => {
     await vi.waitFor(() => expect(status(dialog)).toMatch(/Exported 2 notes/))
     expect(core.callsTo('exportNotes')).toHaveLength(1)
     expect(button(dialog, 'Export all notes…').disabled).toBe(false)
-  })
-
-  it('disables the button while locked', async () => {
-    const { dialog, phase } = await openExport()
-    phase.set({
-      phase: 'locked',
-      account: { server: 'https://notes.example.com', username: 'alice' },
-      credentials_remembered: true,
-    })
-    flushSync()
-    expect(button(dialog, 'Export all notes…').disabled).toBe(true)
   })
 
   it('delivers the open editor’s edits before exporting', async () => {

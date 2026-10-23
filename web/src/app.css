@@ -96,8 +96,8 @@ input[type='search'] {
   font-size: 0.9em;
 }
 
-/* Sign-in, register, recover, and unlock share one centered column. */
-.account-page {
+/* The setup screens share one centered column. */
+.setup-page {
   box-sizing: border-box;
   display: grid;
   place-items: center;
@@ -105,20 +105,20 @@ input[type='search'] {
   padding: 2rem 1rem;
 }
 
-.account-form {
+.setup-form {
   display: flex;
   flex-direction: column;
   gap: 0.9rem;
   width: min(360px, 100%);
 }
 
-.account-form h1 {
+.setup-form h1 {
   margin: 0 0 0.25rem;
   font-size: 1.4rem;
   font-weight: 600;
 }
 
-.account-links {
+.setup-links {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem 1rem;

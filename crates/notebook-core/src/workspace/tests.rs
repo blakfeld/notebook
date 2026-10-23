@@ -469,6 +469,49 @@ fn purge_while_offline_leaves_the_note_in_trash() {
     assert_eq!(a.ws.list(&Selection::View(View::Trash), "").len(), 1);
 }
 
+#[test]
+fn local_workspace_deletes_trashed_notes_with_no_engine() {
+    let [key] = vault_keys(vault());
+    let replica = Shared::new(Replica::open(MemoryStorage::new(vault()), key).unwrap());
+    let (mut ws, mut changes) = Workspace::open_local(replica.clone());
+    assert!(ws.sync().is_none());
+
+    let id = ws.create(&NOTES, T1).unwrap();
+    ws.set_body(id, "Doomed #old", T1).unwrap();
+    let kept = ws.create(&NOTES, T1).unwrap();
+    assert_eq!(
+        ws.delete_permanently(id),
+        Err(WorkspaceError::NotTrashed(id))
+    );
+    let unknown = NoteId::from_parts(1, 1);
+    assert_eq!(
+        ws.delete_permanently(unknown),
+        Err(WorkspaceError::NotFound(unknown))
+    );
+
+    ws.set_trashed(id, true).unwrap();
+    while changes.try_recv().is_ok() {}
+    ws.delete_permanently(id).unwrap();
+    assert!(ws.note(id).is_none());
+    assert!(ws.list(&Selection::View(View::Trash), "").is_empty());
+    assert!(ws.note(kept).is_some());
+    let changed = changes.try_recv().unwrap();
+    assert_eq!(changed.notes, [id]);
+    assert_eq!(
+        replica.lock().storage().unwrap().load_note(id).unwrap(),
+        None
+    );
+
+    // A local workspace can't purge through an engine.
+    let other = ws.create(&NOTES, T2).unwrap();
+    ws.set_trashed(other, true).unwrap();
+    let purge = ws.purge(other).unwrap();
+    assert_eq!(
+        futures::executor::block_on(purge),
+        Err(WorkspaceError::Sync(SyncError::Stopped))
+    );
+}
+
 // ---- 3.4 rename ----
 
 #[test]

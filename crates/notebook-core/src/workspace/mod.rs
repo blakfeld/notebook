@@ -14,6 +14,10 @@
 //! Like the replica, a workspace is only ever used inside synchronous calls.
 //! [`Workspace::purge`] returns a future that doesn't borrow it, so the host
 //! can await it without holding whatever lock guards the workspace.
+//!
+//! A local-only workspace ([`Workspace::open_local`]) has no engine: edits
+//! are stored by the replica as usual, and [`Workspace::delete_permanently`]
+//! removes a trashed note from the device at once.
 
 mod server_url;
 
@@ -126,7 +130,7 @@ const PREVIEW_CHARS: usize = 200;
 /// tag tree and search index derived from it.
 pub struct Workspace<S: Storage> {
     replica: Shared<Replica<S>>,
-    sync: SyncHandle,
+    sync: Option<SyncHandle>,
     tree: TagTree,
     index: SearchIndex,
     /// Each attached editor's note, to refuse edits to trashed notes.
@@ -140,6 +144,19 @@ impl<S: Storage> Workspace<S> {
     pub fn open(
         replica: Shared<Replica<S>>,
         sync: SyncHandle,
+    ) -> (Self, mpsc::UnboundedReceiver<Changed>) {
+        Self::open_with(replica, Some(sync))
+    }
+
+    /// Like [`open`](Self::open), with no sync engine: nothing leaves the
+    /// device.
+    pub fn open_local(replica: Shared<Replica<S>>) -> (Self, mpsc::UnboundedReceiver<Changed>) {
+        Self::open_with(replica, None)
+    }
+
+    fn open_with(
+        replica: Shared<Replica<S>>,
+        sync: Option<SyncHandle>,
     ) -> (Self, mpsc::UnboundedReceiver<Changed>) {
         let (changes, changes_rx) = mpsc::unbounded();
         let mut workspace = Self {
@@ -158,8 +175,9 @@ impl<S: Storage> Workspace<S> {
         &self.replica
     }
 
-    pub fn sync(&self) -> &SyncHandle {
-        &self.sync
+    /// The engine handle, or `None` for a local-only workspace.
+    pub fn sync(&self) -> Option<&SyncHandle> {
+        self.sync.as_ref()
     }
 
     /// The tag tree of notes that are neither archived nor trashed.
@@ -253,12 +271,30 @@ impl<S: Storage> Workspace<S> {
         }
         let sync = self.sync.clone();
         Ok(async move {
+            let sync = sync.ok_or(WorkspaceError::Sync(SyncError::Stopped))?;
             sync.purge(id).await.map_err(|err| match err {
                 SyncError::NotTrashed(id) => WorkspaceError::NotTrashed(id),
                 SyncError::NoteNotFound(id) => WorkspaceError::NotFound(id),
                 err => WorkspaceError::Sync(err),
             })
         })
+    }
+
+    /// Permanently deletes a trashed note from this device, with no engine
+    /// involved. For a local-only workspace; one with an engine uses
+    /// [`purge`](Self::purge) so the server deletes it too.
+    pub fn delete_permanently(&mut self, id: NoteId) -> Result<()> {
+        match self.note(id) {
+            None => return Err(WorkspaceError::NotFound(id)),
+            Some(note) if !note.is_trashed() => return Err(WorkspaceError::NotTrashed(id)),
+            Some(_) => {}
+        }
+        self.replica
+            .lock()
+            .delete_note(id)
+            .map_err(ReplicaError::from)?;
+        self.refresh(&[id]);
+        Ok(())
     }
 
     /// Renames or moves tag `old` to `new` in every note carrying it or a

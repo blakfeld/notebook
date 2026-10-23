@@ -1,145 +1,20 @@
-//! State machine tests against a real `notebook-server` in this process.
+//! State machine tests: launch phases, creating a notebook, the recovery
+//! key, and the upgrade from a server-backed install. No server or network
+//! is involved anywhere.
 
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use notebook_core::crypto::{AuthSecret, KeyBundle, RecoveryKey};
-use notebook_core::sync::SyncConfig;
-use notebook_server::app;
-use notebook_server::auth::{keyfile, unix_now};
-use notebook_server::config::Config;
-use notebook_server::sync::{LiveSettings, SyncState};
-use notebook_server::{db, invites};
+use notebook_core::crypto::LocalUnlock;
+use notebook_core::sync::{Replica, Shared};
+use notebook_storage_sqlite::SqliteStorage;
 use serde_json::Value;
 
 use super::*;
-use crate::credentials::MemoryStore;
-use crate::dto::ViewDto;
+use crate::credentials::{Entry, MemoryStore, legacy};
+use crate::dto::{SelectionDto, ViewDto};
 use crate::events::Recorder;
 
-pub(crate) const PASSPHRASE: &str = "correct horse battery staple";
-pub(crate) const NEW_PASSPHRASE: &str = "a brand new passphrase";
-
-/// `notebook-server` on its own runtime, so stopping it drops every
-/// connection at once (the server's graceful shutdown would keep them).
-pub(crate) struct TestServer {
-    pub url: String,
-    addr: SocketAddr,
-    dir: tempfile::TempDir,
-    runtime: Option<tokio::runtime::Runtime>,
-    pool: Option<sqlx::SqlitePool>,
-}
-
-impl TestServer {
-    pub async fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let mut server = Self {
-            url: String::new(),
-            addr: "127.0.0.1:0".parse().unwrap(),
-            dir,
-            runtime: None,
-            pool: None,
-        };
-        server.serve().await;
-        server
-    }
-
-    async fn serve(&mut self) {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .unwrap();
-        let db_path = self.dir.path().join("server.db");
-        let key_path = self.dir.path().join("opaque.key");
-        let addr = self.addr;
-        let (pool, addr) = runtime
-            .spawn(async move {
-                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-                let addr = listener.local_addr().unwrap();
-                let url = format!("http://{addr}");
-                let config = Config::from_sources(None, |key| match key {
-                    "NOTEBOOK_PUBLIC_URL" => Some(url.clone()),
-                    "NOTEBOOK_RATE_LIMIT_PER_SECOND" => Some("1000".into()),
-                    "NOTEBOOK_RATE_LIMIT_BURST" => Some("1000".into()),
-                    "NOTEBOOK_REGISTRATION_RATE_LIMIT_BURST" => Some("100".into()),
-                    _ => None,
-                })
-                .unwrap();
-                let pool = db::connect(&db_path).await.unwrap();
-                db::migrate(&pool).await.unwrap();
-                let setup = keyfile::load_or_create(&pool, &key_path).await.unwrap();
-                let mut state = app::AppState::new(pool.clone(), config, setup);
-                // Notice ended sessions on open live channels quickly.
-                state.sync = Arc::new(SyncState::new(LiveSettings {
-                    ping_interval: Duration::from_millis(200),
-                    ..LiveSettings::default()
-                }));
-                let router = app::router(state);
-                tokio::spawn(app::run(listener, router, std::future::pending()));
-                (pool, addr)
-            })
-            .await
-            .unwrap();
-        self.addr = addr;
-        self.url = format!("http://{addr}");
-        self.pool = Some(pool);
-        self.runtime = Some(runtime);
-    }
-
-    /// Stops answering: open connections drop, new ones are refused, and
-    /// the database is closed (so its files can be copied).
-    pub fn stop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
-        }
-        if let Some(pool) = self.pool.take() {
-            // On a fresh runtime: the server's is gone, and the caller may be
-            // inside another.
-            std::thread::spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(pool.close());
-            })
-            .join()
-            .unwrap();
-        }
-    }
-
-    /// Serves again on the same address with the same data.
-    pub async fn restart(&mut self) {
-        self.stop();
-        self.serve().await;
-    }
-
-    pub fn db_path(&self) -> PathBuf {
-        self.dir.path().join("server.db")
-    }
-
-    pub async fn invite(&self) -> String {
-        let pool = self.pool.clone().unwrap();
-        self.runtime
-            .as_ref()
-            .unwrap()
-            .spawn(async move {
-                invites::create(&pool, unix_now(), Duration::from_secs(86_400), None)
-                    .await
-                    .unwrap()
-                    .1
-            })
-            .await
-            .unwrap()
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
+pub(crate) const OLD_PASSPHRASE: &str = "correct horse battery staple";
 
 /// One install: its data directory and credential store, which survive a
 /// relaunch.
@@ -147,18 +22,6 @@ pub(crate) struct Install {
     pub dir: tempfile::TempDir,
     pub creds: Arc<MemoryStore>,
     pub events: Arc<Recorder>,
-}
-
-pub(crate) fn sync_config() -> SyncConfig {
-    SyncConfig {
-        jitter: false,
-        debounce: Duration::from_millis(20),
-        max_debounce: Duration::from_millis(100),
-        poll_interval: Duration::from_millis(200),
-        backoff_base: Duration::from_millis(50),
-        backoff_cap: Duration::from_millis(300),
-        ..SyncConfig::default()
-    }
 }
 
 impl Install {
@@ -179,8 +42,6 @@ impl Install {
         AppState::launch(
             AppConfig {
                 data_dir: self.dir.path().to_owned(),
-                sync: sync_config(),
-                device: Device::default(),
             },
             self.creds.clone(),
             self.events.clone(),
@@ -194,45 +55,31 @@ impl Install {
     pub fn has(&self, entry: Entry) -> bool {
         self.creds.get(entry).unwrap().is_some()
     }
+
+    pub fn files(&self) -> Vec<String> {
+        file_names(self.dir.path())
+    }
 }
 
 impl AppState {
-    /// Quits: stops the engine without changing any entry.
-    pub(crate) async fn quit(&self) {
-        let previous = std::mem::replace(&mut *self.lock_phase(), Phase::SignedOut);
-        if let Phase::Unlocked(unlocked) = previous {
-            self.0.stop(*unlocked).await;
-        }
+    /// Quits: closes the vault without changing any entry.
+    pub(crate) fn quit(&self) {
+        *self.lock_phase() = Phase::Setup;
     }
 }
 
-/// Polls `check` until it holds, failing after ten seconds.
-pub(crate) async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !check() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-pub(crate) async fn registered(server: &TestServer, install: &Install, username: &str) -> AppState {
+/// A new notebook on `install`, open, and its recovery key.
+pub(crate) async fn created(install: &Install) -> (AppState, String) {
     let app = install.launch();
-    app.generate_recovery_key().unwrap();
-    let invite = server.invite().await;
-    app.register(&server.url, username, PASSPHRASE, PASSPHRASE, &invite)
-        .await
-        .unwrap();
-    app
+    let key = app.create_notebook().await.unwrap().to_string();
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Open);
+    (app, key)
 }
 
 pub(crate) fn notes() -> SelectionDto {
     SelectionDto::View(ViewDto::Notes)
 }
-
-use crate::dto::SelectionDto;
 
 fn code<T: std::fmt::Debug>(result: AppResult<T>) -> Code {
     result.unwrap_err().code
@@ -247,14 +94,6 @@ fn phases(events: &Recorder) -> Vec<Value> {
         .collect()
 }
 
-/// An address nothing listens on: any request to it fails.
-fn dead_server() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    drop(listener);
-    format!("http://{addr}")
-}
-
 fn file_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
@@ -264,723 +103,601 @@ fn file_names(dir: &Path) -> Vec<String> {
     names
 }
 
-// ---- 4.2 launch phases ----
+fn bodies(app: &AppState) -> Vec<String> {
+    let mut titles: Vec<String> = app
+        .list_notes(notes(), "")
+        .unwrap()
+        .into_iter()
+        .map(|e| e.title)
+        .collect();
+    titles.sort();
+    titles
+}
+
+/// A copy of the vault key, for tests that need to keep one.
+fn same_key(key: &VaultKey) -> VaultKey {
+    copy_key(key)
+}
+
+// ---- launch phases ----
 
 #[tokio::test]
-async fn launch_without_entries_is_signed_out() {
+async fn launch_with_nothing_shows_setup() {
     let install = Install::new();
     let app = install.launch();
-    assert_eq!(app.phase().phase, PhaseName::SignedOut);
-    assert_eq!(app.phase().account, None);
-    assert!(app.phase().credentials_remembered);
+    let phase = app.phase();
+    assert_eq!(phase.phase, PhaseName::Setup);
+    assert!(phase.secure_store);
+    assert!(!phase.upgrade);
+    assert_eq!(code(app.list_notes(notes(), "")), Code::NotOpen);
+    assert!(install.files().is_empty());
 }
 
 #[tokio::test]
-async fn launch_with_auto_unlock_opens_the_vault() {
-    let server = TestServer::start().await;
+async fn relaunch_opens_with_no_prompt() {
     let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
+    let (app, _) = created(&install).await;
+    let id = app.create_note(notes()).unwrap();
+    app.quit();
+
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::Open);
+    assert_eq!(app.list_notes(notes(), "").unwrap()[0].id, id);
+}
+
+#[tokio::test]
+async fn database_without_a_keychain_entry_asks_for_the_recovery_key() {
+    let install = Install::new();
+    let (app, key) = created(&install).await;
     app.create_note(notes()).unwrap();
-    app.quit().await;
+    app.quit();
+    install.creds.delete(Entry::VaultKey).unwrap();
 
     let app = install.launch();
-    assert_eq!(app.phase().phase, PhaseName::Unlocked);
+    assert_eq!(app.phase().phase, PhaseName::NeedsRecoveryKey);
+    assert!(app.phase().secure_store);
+    app.open_with_recovery_key(&key).await.unwrap();
     assert_eq!(app.list_notes(notes(), "").unwrap().len(), 1);
+    // With a secure store, the key is remembered again.
+    assert!(install.has(Entry::VaultKey));
+    app.quit();
+    assert_eq!(install.launch().phase().phase, PhaseName::Open);
 }
 
 #[tokio::test]
-async fn launch_without_auto_unlock_is_locked() {
-    let server = TestServer::start().await;
+async fn a_keychain_entry_for_another_vault_is_ignored() {
     let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.lock().await.unwrap();
-    assert!(!install.has(Entry::AutoUnlock));
-    app.quit().await;
+    let (app, _) = created(&install).await;
+    app.quit();
+    credentials::save_vault_key(
+        &*install.creds,
+        VaultId::from_parts(1, 1),
+        &VaultKey::generate().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(install.launch().phase().phase, PhaseName::NeedsRecoveryKey);
+}
+
+#[tokio::test]
+async fn a_database_nothing_can_open_is_moved_aside() {
+    let install = Install::new();
+    // A version-one store with no credentials: an old install's leftovers.
+    let vault = VaultId::from_parts(5, 5);
+    let mut storage = SqliteStorage::open(install.db(), vault).unwrap();
+    storage.set_setting("editor.vimMode", "true").unwrap();
+    drop(storage);
 
     let app = install.launch();
-    let phase = app.phase();
-    assert_eq!(phase.phase, PhaseName::Locked);
-    assert_eq!(phase.account.unwrap().username, "alice");
-    assert_eq!(code(app.list_notes(notes(), "")), Code::Locked);
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    let files = install.files();
+    assert!(
+        !files.contains(&vault::DATABASE_FILE.to_owned()),
+        "{files:?}"
+    );
+    let moved = files
+        .iter()
+        .find(|f| f.starts_with("vault.sqlite3.legacy-") && !f.ends_with("-wal"))
+        .unwrap();
+    let kept = SqliteStorage::open(install.dir.path().join(moved), vault).unwrap();
+    assert_eq!(
+        kept.setting("editor.vimMode").unwrap().as_deref(),
+        Some("true")
+    );
 }
 
-// ---- 4.3 sign in and register ----
+// ---- creating a notebook ----
 
 #[tokio::test]
-async fn invalid_input_sends_no_request() {
+async fn create_shows_a_key_and_opens_an_empty_notebook() {
     let install = Install::new();
     let app = install.launch();
-    // A remote http address is refused before any connection.
-    assert_eq!(
-        code(
-            app.sign_in("http://notes.example.com", "alice", PASSPHRASE)
-                .await
-        ),
-        Code::InvalidServerUrl
-    );
-    // Against an address nothing answers, a request would be `unreachable`.
-    let dead = dead_server();
-    app.generate_recovery_key().unwrap();
-    assert_eq!(
-        code(
-            app.register(&dead, "alice", PASSPHRASE, "different one!!", "x")
-                .await
-        ),
-        Code::PassphraseMismatch
-    );
-    assert_eq!(
-        code(
-            app.register(&dead, "alice", "too short", "too short", "x")
-                .await
-        ),
-        Code::PassphraseTooShort
-    );
-    assert_eq!(
-        code(
-            app.recover(&dead, "alice", "not-a-key", PASSPHRASE, PASSPHRASE)
-                .await
-        ),
-        Code::RecoveryKeyMalformed
-    );
-    assert_eq!(
-        code(app.sign_in(&dead, "alice", PASSPHRASE).await),
-        Code::Unreachable
-    );
-}
+    let key = app.create_notebook().await.unwrap();
+    assert!(RecoveryKey::parse(&key).is_ok());
+    assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
+    assert_eq!(*app.pending_recovery_key().unwrap(), *key);
+    assert_eq!(code(app.list_notes(notes(), "")), Code::NotOpen);
+    assert_eq!(code(app.create_notebook().await), Code::NotOpen);
 
-#[tokio::test]
-async fn registration_opens_an_empty_vault() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    let phase = app.phase();
-    assert_eq!(phase.phase, PhaseName::Unlocked);
-    assert_eq!(phase.account.unwrap().server, server.url);
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Open);
     assert!(app.list_notes(notes(), "").unwrap().is_empty());
-    assert!(install.has(Entry::Session));
-    assert!(install.has(Entry::LocalUnlock));
-    assert!(install.has(Entry::AutoUnlock));
-    assert!(install.db().exists());
-    assert_eq!(phases(&install.events), [Value::from("unlocked")]);
-}
+    assert!(app.tag_tree().unwrap().is_empty());
+    assert!(install.has(Entry::VaultKey));
+    assert_eq!(phases(&install.events), ["pending_recovery_key", "open"]);
 
-#[tokio::test]
-async fn register_needs_a_pending_recovery_key() {
-    let server = TestServer::start().await;
-    let app_install = Install::new();
-    let app = app_install.launch();
-    let invite = server.invite().await;
-    assert_eq!(
-        code(
-            app.register(&server.url, "alice", PASSPHRASE, PASSPHRASE, &invite)
-                .await
-        ),
-        Code::RecoveryKeyRequired
-    );
-}
+    // Never shown again.
+    assert_eq!(code(app.pending_recovery_key()), Code::NotOpen);
+    assert_eq!(code(app.acknowledge_recovery_key().await), Code::NotOpen);
 
-#[tokio::test]
-async fn register_refusals_keep_the_recovery_key() {
-    let server = TestServer::start().await;
-    let _taken_install = Install::new();
-    let _taken = registered(&server, &_taken_install, "taken").await;
-
-    let app_install = Install::new();
-    let app = app_install.launch();
-    app.generate_recovery_key().unwrap();
-    assert_eq!(
-        code(
-            app.register(&server.url, "bob", PASSPHRASE, PASSPHRASE, "bogus-code")
-                .await
-        ),
-        Code::InvalidInvite
-    );
-    let invite = server.invite().await;
-    assert_eq!(
-        code(
-            app.register(&server.url, "taken", PASSPHRASE, PASSPHRASE, &invite)
-                .await
-        ),
-        Code::UsernameTaken
-    );
-    // The same key is still pending, so the user can fix the username.
-    app.register(&server.url, "bob", PASSPHRASE, PASSPHRASE, &invite)
-        .await
+    // The stored recovery entry opens with the key that was shown.
+    let stored = SqliteStorage::peek(install.db()).unwrap().unwrap();
+    let recovery = RecoveryKey::parse(&key).unwrap();
+    let (vault, stored_key) = credentials::load_vault_key(&*install.creds)
+        .unwrap()
         .unwrap();
-    assert_eq!(app.phase().phase, PhaseName::Unlocked);
+    assert_eq!(stored.vault, vault);
+    let opened = stored.recovery_entry.unwrap().open(&recovery).unwrap();
+    assert_eq!(*opened.to_secret_bytes(), *stored_key.to_secret_bytes());
 }
 
 #[tokio::test]
-async fn unknown_user_and_wrong_passphrase_are_both_bad_credentials() {
-    let server = TestServer::start().await;
-    let _alice_install = Install::new();
-    let _alice = registered(&server, &_alice_install, "alice").await;
-    let app_install = Install::new();
-    let app = app_install.launch();
-    assert_eq!(
-        code(app.sign_in(&server.url, "nobody", PASSPHRASE).await),
-        Code::BadCredentials
-    );
-    assert_eq!(
-        code(app.sign_in(&server.url, "alice", "wrong wrong wrong").await),
-        Code::BadCredentials
-    );
-    assert_eq!(app.phase().phase, PhaseName::SignedOut);
-}
-
-#[tokio::test]
-async fn sign_in_on_a_fresh_install_downloads_the_vault() {
-    let server = TestServer::start().await;
-    let first_install = Install::new();
-    let first = registered(&server, &first_install, "alice").await;
-    for _ in 0..3 {
-        first.create_note(notes()).unwrap();
-    }
-    eventually("the first device to sync", || {
-        first.pending_count().unwrap() == 0
-    })
-    .await;
-
+async fn quitting_before_acknowledgment_leaves_nothing() {
     let install = Install::new();
-    let second = install.launch();
-    second
-        .sign_in(&server.url, "alice", PASSPHRASE)
-        .await
-        .unwrap();
-    eventually("the second device to download", || {
-        second.list_notes(notes(), "").unwrap().len() == 3
-    })
-    .await;
+    let app = install.launch();
+    app.create_notebook().await.unwrap();
+    app.quit();
+    drop(app);
+
+    assert!(install.files().is_empty());
+    assert!(!install.has(Entry::VaultKey));
+    assert_eq!(install.launch().phase().phase, PhaseName::Setup);
 }
 
 #[tokio::test]
-async fn without_a_secure_store_nothing_is_remembered() {
-    let server = TestServer::start().await;
-    let _alice_install = Install::new();
-    let _alice = registered(&server, &_alice_install, "alice").await;
+async fn a_keychain_refusing_the_write_falls_back_to_the_recovery_key() {
+    // Reads work but every write fails, as a keychain that locks does.
+    let install = Install::with_store(MemoryStore::fails_after(0));
+    let app = install.launch();
+    let key = app.create_notebook().await.unwrap();
+    // The refusal reads as a missing store, which is not an error: the
+    // notebook opens and the key is asked for next time.
+    app.acknowledge_recovery_key().await.unwrap();
+    assert!(!app.phase().secure_store);
+    app.quit();
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::NeedsRecoveryKey);
+    app.open_with_recovery_key(&key).await.unwrap();
+}
 
+// ---- without a secure store ----
+
+#[tokio::test]
+async fn without_a_secure_store_the_recovery_key_opens_each_launch() {
     let install = Install::with_store(MemoryStore::unavailable());
     let app = install.launch();
-    let phase = app.sign_in(&server.url, "alice", PASSPHRASE).await.unwrap();
-    assert_eq!(phase.phase, PhaseName::Unlocked);
-    assert!(!phase.credentials_remembered);
+    assert!(!app.phase().secure_store);
+    let key = app.create_notebook().await.unwrap().to_string();
+    app.acknowledge_recovery_key().await.unwrap();
     app.create_note(notes()).unwrap();
-    app.quit().await;
+    app.quit();
 
-    // The OS store still has nothing (and can't), so the next launch asks
-    // to sign in.
-    let app = install.launch();
-    assert_eq!(app.phase().phase, PhaseName::SignedOut);
-    // No secret went to a file instead.
-    for name in file_names(install.dir.path()) {
-        assert!(name.starts_with("vault.sqlite3"), "{name}");
+    for _ in 0..2 {
+        let app = install.launch();
+        let phase = app.phase();
+        assert_eq!(phase.phase, PhaseName::NeedsRecoveryKey);
+        assert!(!phase.secure_store);
+        app.open_with_recovery_key(&key).await.unwrap();
+        assert_eq!(app.list_notes(notes(), "").unwrap().len(), 1);
+        app.quit();
+    }
+    // Only the database, which holds no usable key.
+    for name in install.files() {
+        assert!(name.starts_with(vault::DATABASE_FILE), "{name}");
     }
 }
 
-// ---- 4.4 lock and unlock ----
-
 #[tokio::test]
-async fn lock_hides_everything_and_persists() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.create_note(notes()).unwrap();
-    install.events.take();
+async fn wrong_and_mistyped_recovery_keys_differ() {
+    let install = Install::with_store(MemoryStore::unavailable());
+    let (app, key) = created(&install).await;
+    app.quit();
+    let app = install.launch();
 
-    let phase = app.lock().await.unwrap();
-    assert_eq!(phase.phase, PhaseName::Locked);
-    assert_eq!(phases(&install.events), [Value::from("locked")]);
-    assert_eq!(code(app.list_notes(notes(), "")), Code::Locked);
-    assert_eq!(code(app.tag_tree()), Code::Locked);
-    assert!(!install.has(Entry::AutoUnlock));
-    assert!(install.has(Entry::Session));
-
-    app.quit().await;
-    assert_eq!(install.launch().phase().phase, PhaseName::Locked);
-}
-
-#[tokio::test]
-async fn unlock_online() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.create_note(notes()).unwrap();
-    app.lock().await.unwrap();
-
-    let phase = app.unlock(PASSPHRASE).await.unwrap();
-    assert_eq!(phase.phase, PhaseName::Unlocked);
-    assert_eq!(app.list_notes(notes(), "").unwrap().len(), 1);
-    assert!(install.has(Entry::AutoUnlock));
-    eventually("sync to resume", || app.pending_count().unwrap() == 0).await;
-}
-
-#[tokio::test]
-async fn unlock_offline() {
-    let mut server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.create_note(notes()).unwrap();
-    app.lock().await.unwrap();
-    server.stop();
-
+    let other = RecoveryKey::generate().unwrap().to_display();
     assert_eq!(
-        code(app.unlock("wrong wrong wrong").await),
-        Code::WrongPassphrase
+        code(app.open_with_recovery_key(&other).await),
+        Code::RecoveryKeyWrong
     );
-    assert_eq!(app.phase().phase, PhaseName::Locked);
-    app.unlock(PASSPHRASE).await.unwrap();
-    assert_eq!(app.list_notes(notes(), "").unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn wrong_passphrase_online_stays_locked() {
-    let server = TestServer::start().await;
-    let app_install = Install::new();
-    let app = registered(&server, &app_install, "alice").await;
-    app.lock().await.unwrap();
+    // One character changed fails the checksum.
+    let mut typo: Vec<char> = key.chars().collect();
+    typo[0] = if typo[0] == 'A' { 'B' } else { 'A' };
+    let typo: String = typo.into_iter().collect();
     assert_eq!(
-        code(app.unlock("wrong wrong wrong").await),
-        Code::WrongPassphrase
-    );
-    assert_eq!(app.phase().phase, PhaseName::Locked);
-}
-
-#[tokio::test]
-async fn changed_fingerprint_forces_online_unlock() {
-    let mut server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-
-    // A refresh that brings back a different bundle, as after a passphrase
-    // change on another device.
-    let vault = match &*app.lock_phase() {
-        Phase::Unlocked(u) => u.account.vault,
-        _ => unreachable!(),
-    };
-    let other = KeyBundle::create(
-        vault,
-        &VaultKey::generate().unwrap(),
-        &AuthSecret::from_bytes(&[5; 32]).unwrap(),
-        &RecoveryKey::generate().unwrap(),
-    )
-    .unwrap();
-    let stored = credentials::load_session(&*install.creds).unwrap().unwrap();
-    app.0.on_refresh(&Refreshed {
-        refresh_token: stored.refresh_token.clone(),
-        key_bundle: Some(other.to_bytes()),
-    });
-    assert!(!install.has(Entry::LocalUnlock));
-
-    // The same bundle again changes nothing.
-    app.lock().await.unwrap();
-    server.stop();
-    assert_eq!(code(app.unlock(PASSPHRASE).await), Code::Offline);
-    server.restart().await;
-    app.unlock(PASSPHRASE).await.unwrap();
-    assert!(install.has(Entry::LocalUnlock));
-}
-
-#[tokio::test]
-async fn a_refresh_with_the_same_bundle_keeps_the_local_wrap() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    let (tokens, account) = app
-        .with_vault(|u| Ok((u.tokens.clone(), u.account.clone())))
-        .unwrap();
-    let client = auth_client(&account.server).unwrap();
-    let bundle = tokens
-        .authed(&client, |t| {
-            let client = &client;
-            async move { client.key_bundle(&t).await }
-        })
-        .await
-        .unwrap();
-    check_fingerprint(&*install.creds, account.vault, &bundle);
-    assert!(install.has(Entry::LocalUnlock));
-}
-
-// ---- 4.5 recovery, passphrase change, sign-out, session expiry ----
-
-#[tokio::test]
-async fn recovery_typo_and_wrong_key_differ() {
-    let server = TestServer::start().await;
-    let _alice_install = Install::new();
-    let _alice = registered(&server, &_alice_install, "alice").await;
-    let app_install = Install::new();
-    let app = app_install.launch();
-    let key = RecoveryKey::generate().unwrap();
-    let mut typo = key.to_display().to_string();
-    let last = typo.pop().unwrap();
-    typo.push(if last == 'A' { 'B' } else { 'A' });
-    assert_eq!(
-        code(
-            app.recover(&server.url, "alice", &typo, NEW_PASSPHRASE, NEW_PASSPHRASE)
-                .await
-        ),
+        code(app.open_with_recovery_key(&typo).await),
         Code::RecoveryKeyMalformed
     );
     assert_eq!(
-        code(
-            app.recover(
-                &server.url,
-                "alice",
-                &key.to_display(),
-                NEW_PASSPHRASE,
-                NEW_PASSPHRASE
-            )
-            .await
-        ),
-        Code::RecoveryKeyWrong
+        code(app.open_with_recovery_key("").await),
+        Code::RecoveryKeyMalformed
     );
+    assert_eq!(app.phase().phase, PhaseName::NeedsRecoveryKey);
+    assert_eq!(code(app.list_notes(notes(), "")), Code::NotOpen);
+
+    // Typed loosely, the right key still opens it.
+    let loose = key.to_lowercase().replace('-', " ");
+    app.open_with_recovery_key(&loose).await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Open);
 }
 
-#[tokio::test]
-async fn recovery_replaces_the_passphrase() {
-    let server = TestServer::start().await;
-    let first_install = Install::new();
-    let first = first_install.launch();
-    let display = first.generate_recovery_key().unwrap().to_string();
-    let invite = server.invite().await;
-    first
-        .register(&server.url, "alice", PASSPHRASE, PASSPHRASE, &invite)
-        .await
-        .unwrap();
-    first.create_note(notes()).unwrap();
-    eventually("the note to sync", || first.pending_count().unwrap() == 0).await;
+// ---- upgrade from a server-backed install ----
 
-    let app_install = Install::new();
-    let app = app_install.launch();
-    app.recover(
-        &server.url,
-        "alice",
-        &display,
-        NEW_PASSPHRASE,
-        NEW_PASSPHRASE,
-    )
-    .await
-    .unwrap();
-    eventually("notes to download", || {
-        app.list_notes(notes(), "").unwrap().len() == 1
-    })
-    .await;
-
-    let other_install = Install::new();
-    let other = other_install.launch();
-    assert_eq!(
-        code(other.sign_in(&server.url, "alice", PASSPHRASE).await),
-        Code::BadCredentials
-    );
-    other
-        .sign_in(&server.url, "alice", NEW_PASSPHRASE)
-        .await
-        .unwrap();
+/// A database as a signed-in install of the server-backed app left it:
+/// notes written through a replica (so some are still in the outbox), a
+/// version-one-compatible layout, and its legacy credential entries.
+struct Legacy {
+    vault: VaultId,
+    key: VaultKey,
+    bodies: Vec<String>,
+    outbox: usize,
 }
 
-#[tokio::test]
-async fn passphrase_change() {
-    let mut server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
+fn seed_legacy(install: &Install, locked: bool) -> Legacy {
+    let vault = VaultId::from_parts(1_700_000_000_000, 42);
+    let key = VaultKey::generate().unwrap();
+    let storage = SqliteStorage::open(install.db(), vault).unwrap();
+    let replica = Shared::new(Replica::open(storage, same_key(&key)).unwrap());
+    for body in [
+        "Groceries\n#home",
+        "Standup notes\n#work/acme",
+        "Untitled idea",
+    ] {
+        replica.lock().create_note(body, now()).unwrap();
+    }
+    let mut bodies: Vec<String> = replica
+        .lock()
+        .notes()
+        .iter()
+        .map(|n| n.title().to_owned())
+        .collect();
+    let outbox = replica.lock().pending().unwrap();
+    assert!(outbox > 0);
+    drop(replica);
 
-    assert_eq!(
-        code(
-            app.change_passphrase("wrong wrong wrong", NEW_PASSPHRASE, NEW_PASSPHRASE)
-                .await
-        ),
-        Code::WrongPassphrase
-    );
-    assert_eq!(
-        code(
-            app.change_passphrase(PASSPHRASE, NEW_PASSPHRASE, "something else!")
-                .await
-        ),
-        Code::PassphraseMismatch
-    );
-    app.change_passphrase(PASSPHRASE, NEW_PASSPHRASE, NEW_PASSPHRASE)
-        .await
-        .unwrap();
-
-    let other_install = Install::new();
-    let other = other_install.launch();
-    assert_eq!(
-        code(other.sign_in(&server.url, "alice", PASSPHRASE).await),
-        Code::BadCredentials
-    );
-    other
-        .sign_in(&server.url, "alice", NEW_PASSPHRASE)
-        .await
-        .unwrap();
-
-    // The old passphrase no longer unlocks this device, even offline.
-    app.lock().await.unwrap();
-    server.stop();
-    assert_eq!(code(app.unlock(PASSPHRASE).await), Code::WrongPassphrase);
-    app.unlock(NEW_PASSPHRASE).await.unwrap();
+    legacy::save_session(&*install.creds, vault);
+    let local = LocalUnlock::seal(vault, &key, OLD_PASSPHRASE).unwrap();
+    legacy::save_local_unlock(&*install.creds, &local);
+    if !locked {
+        legacy::save_auto_unlock(&*install.creds, &key);
+    }
+    bodies.sort();
+    Legacy {
+        vault,
+        key,
+        bodies,
+        outbox,
+    }
 }
 
-#[tokio::test]
-async fn passphrase_change_offline_is_refused() {
-    let mut server = TestServer::start().await;
-    let app_install = Install::new();
-    let app = registered(&server, &app_install, "alice").await;
-    server.stop();
-    assert_eq!(
-        code(
-            app.change_passphrase(PASSPHRASE, NEW_PASSPHRASE, NEW_PASSPHRASE)
-                .await
-        ),
-        Code::Offline
-    );
-    server.restart().await;
-    let other_install = Install::new();
-    let other = other_install.launch();
-    other
-        .sign_in(&server.url, "alice", PASSPHRASE)
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn sign_out_removes_the_database_and_entries() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.create_note(notes()).unwrap();
-    eventually("the note to sync", || app.pending_count().unwrap() == 0).await;
-    install.events.take();
-
-    let phase = app.sign_out(false).await.unwrap();
-    assert_eq!(phase.phase, PhaseName::SignedOut);
-    assert_eq!(phases(&install.events), [Value::from("signed_out")]);
+fn assert_upgraded(install: &Install, app: &AppState, old: &Legacy) {
+    assert_eq!(app.phase().phase, PhaseName::Open);
+    assert_eq!(bodies(app), old.bodies);
     for entry in [Entry::Session, Entry::LocalUnlock, Entry::AutoUnlock] {
         assert!(!install.has(entry), "{entry:?}");
     }
-    assert_eq!(file_names(install.dir.path()), Vec::<String>::new());
-    assert_eq!(install.launch().phase().phase, PhaseName::SignedOut);
-}
-
-#[tokio::test]
-async fn sign_out_with_pending_changes_needs_confirmation() {
-    let mut server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    eventually("the first sync", || {
-        app.sync_status().unwrap().state == crate::dto::SyncStateDto::Synced
-    })
-    .await;
-    server.stop();
-    for _ in 0..3 {
-        app.create_note(notes()).unwrap();
-    }
-    assert_eq!(app.pending_count().unwrap(), 3);
-    let err = app.sign_out(false).await.unwrap_err();
-    assert_eq!(err.code, Code::PendingChanges);
-    assert!(err.message.contains('3'));
-    assert_eq!(app.phase().phase, PhaseName::Unlocked);
-
-    // Signing out with the server unreachable still finishes.
-    app.sign_out(true).await.unwrap();
-    assert!(!install.db().exists());
-    assert!(!install.has(Entry::Session));
-}
-
-#[tokio::test]
-async fn sign_out_while_locked() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.lock().await.unwrap();
-    assert_eq!(app.pending_count().unwrap(), 0);
-    app.sign_out(false).await.unwrap();
-    assert!(!install.db().exists());
-    assert!(!install.has(Entry::Session));
-}
-
-#[tokio::test]
-async fn edits_continue_after_the_session_ends() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    eventually("the first sync", || {
-        app.sync_status().unwrap().state == crate::dto::SyncStateDto::Synced
-    })
-    .await;
-
-    // A passphrase change on another device ends this device's session.
-    let other_install = Install::new();
-    let other = other_install.launch();
-    other
-        .sign_in(&server.url, "alice", PASSPHRASE)
-        .await
+    let (vault, key) = credentials::load_vault_key(&*install.creds)
+        .unwrap()
         .unwrap();
-    other
-        .change_passphrase(PASSPHRASE, NEW_PASSPHRASE, NEW_PASSPHRASE)
-        .await
-        .unwrap();
+    assert_eq!(vault, old.vault);
+    assert_eq!(*key.to_secret_bytes(), *old.key.to_secret_bytes());
+}
 
-    let id = app.create_note(notes()).unwrap();
-    eventually("sign-in required", || {
-        app.sync_status()
-            .unwrap()
-            .attention
-            .contains(&crate::dto::AttentionDto::SignInRequired)
+#[tokio::test]
+async fn signed_in_install_upgrades_with_a_new_recovery_key() {
+    let install = Install::new();
+    let old = seed_legacy(&install, false);
+
+    let app = install.launch();
+    let phase = app.phase();
+    assert_eq!(phase.phase, PhaseName::PendingRecoveryKey);
+    assert!(phase.upgrade);
+    let key = app.pending_recovery_key().unwrap();
+    // Nothing is deleted before acknowledgment.
+    assert!(install.has(Entry::Session));
+    assert!(install.has(Entry::AutoUnlock));
+    assert!(!install.has(Entry::VaultKey));
+
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_upgraded(&install, &app, &old);
+    // Pending outbox entries are left in place for `retire-sync-server`.
+    app.with_vault(|open| {
+        assert_eq!(
+            open.workspace.replica().lock().pending().unwrap(),
+            old.outbox
+        );
+        Ok(())
     })
-    .await;
-    app.set_pinned(&id, true).unwrap();
-    assert_eq!(app.phase().phase, PhaseName::Unlocked);
-    assert!(app.pending_count().unwrap() > 0);
+    .unwrap();
+    app.quit();
 
+    // Later launches open with no prompt, and the new key opens a copy.
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::Open);
+    assert_eq!(bodies(&app), old.bodies);
+    let entry = SqliteStorage::peek(install.db())
+        .unwrap()
+        .unwrap()
+        .recovery_entry
+        .unwrap();
+    assert!(entry.open(&RecoveryKey::parse(&key).unwrap()).is_ok());
+}
+
+#[tokio::test]
+async fn quitting_an_upgrade_before_acknowledgment_runs_it_again() {
+    let install = Install::new();
+    let old = seed_legacy(&install, false);
+    let app = install.launch();
+    let first = app.pending_recovery_key().unwrap();
+    app.quit();
+    drop(app);
+    assert!(install.has(Entry::Session));
+
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
+    let second = app.pending_recovery_key().unwrap();
+    assert_ne!(*first, *second);
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_upgraded(&install, &app, &old);
+}
+
+#[tokio::test]
+async fn locked_install_upgrades_with_the_old_passphrase() {
+    let install = Install::new();
+    let old = seed_legacy(&install, true);
+
+    let app = install.launch();
+    let phase = app.phase();
+    assert_eq!(phase.phase, PhaseName::NeedsOldPassphrase);
+    assert!(phase.upgrade);
     assert_eq!(
-        code(app.reauthenticate(PASSPHRASE).await),
+        code(app.upgrade_with_passphrase("not the passphrase").await),
         Code::WrongPassphrase
     );
-    app.reauthenticate(NEW_PASSPHRASE).await.unwrap();
-    eventually("pending edits to sync", || {
-        app.pending_count().unwrap() == 0
-    })
-    .await;
-    eventually("the other device to see them", || {
-        other
-            .list_notes(notes(), "")
-            .unwrap()
+    assert_eq!(app.phase().phase, PhaseName::NeedsOldPassphrase);
+
+    app.upgrade_with_passphrase(OLD_PASSPHRASE).await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
+    assert!(install.has(Entry::LocalUnlock));
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_upgraded(&install, &app, &old);
+    app.quit();
+
+    // No passphrase is asked for again.
+    assert_eq!(install.launch().phase().phase, PhaseName::Open);
+}
+
+#[tokio::test]
+async fn starting_over_keeps_the_old_database() {
+    let install = Install::new();
+    let old = seed_legacy(&install, true);
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::NeedsOldPassphrase);
+
+    app.start_over().await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    // The passphrase entry still opens the moved file if remembered later.
+    assert!(install.has(Entry::Session));
+    assert!(install.has(Entry::LocalUnlock));
+    // Quitting here and relaunching shows the welcome screen, not the
+    // passphrase prompt again.
+    app.quit();
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    let files = install.files();
+    assert!(
+        !files.contains(&vault::DATABASE_FILE.to_owned()),
+        "{files:?}"
+    );
+    let moved = files
+        .iter()
+        .find(|f| f.starts_with("vault.sqlite3.legacy-") && !f.contains("-wal"))
+        .unwrap()
+        .clone();
+
+    // A new, empty notebook beside the old one.
+    let key = app.create_notebook().await.unwrap();
+    app.acknowledge_recovery_key().await.unwrap();
+    assert!(app.list_notes(notes(), "").unwrap().is_empty());
+    assert!(RecoveryKey::parse(&key).is_ok());
+    app.quit();
+    // The new notebook wins over the leftover legacy entries.
+    assert_eq!(install.launch().phase().phase, PhaseName::Open);
+
+    // The old database is intact and still opens with the old key.
+    let storage = SqliteStorage::open(install.dir.path().join(moved), old.vault).unwrap();
+    let replica = Replica::open(storage, same_key(&old.key)).unwrap();
+    let mut kept: Vec<String> = replica
+        .notes()
+        .iter()
+        .map(|n| n.title().to_owned())
+        .collect();
+    kept.sort();
+    assert_eq!(kept, old.bodies);
+}
+
+#[tokio::test]
+async fn upgrade_with_neither_key_entry_starts_over() {
+    let install = Install::new();
+    seed_legacy(&install, true);
+    install.creds.delete(Entry::LocalUnlock).unwrap();
+
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    assert!(
+        install
+            .files()
             .iter()
-            .any(|e| e.id == id && e.pinned)
-    })
-    .await;
+            .any(|f| f.starts_with("vault.sqlite3.legacy-"))
+    );
+    // Entries are never deleted without an acknowledged upgrade, and a
+    // relaunch doesn't try to upgrade the moved file again.
+    assert!(install.has(Entry::Session));
+    app.quit();
+    assert_eq!(install.launch().phase().phase, PhaseName::Setup);
 }
 
-// ---- review fixes ----
+#[tokio::test]
+async fn an_unreadable_session_entry_keeps_the_legacy_key() {
+    let install = Install::new();
+    let old = seed_legacy(&install, false);
+    install.creds.set(Entry::Session, b"not json").unwrap();
+
+    // Nothing is moved or deleted; the user can choose to start over.
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::NeedsRecoveryKey);
+    assert!(install.files().contains(&vault::DATABASE_FILE.to_owned()));
+    app.start_over().await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    let key = credentials::load_legacy_auto_unlock(&*install.creds)
+        .unwrap()
+        .unwrap();
+    assert_eq!(*key.to_secret_bytes(), *old.key.to_secret_bytes());
+}
 
 #[tokio::test]
-async fn sync_resumes_after_a_relaunch() {
-    let server = TestServer::start().await;
+async fn a_keychain_denied_at_launch_changes_nothing() {
     let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.quit().await;
+    let old = seed_legacy(&install, false);
+
+    // One launch where the keychain refuses every read, as after a denied
+    // macOS prompt.
+    let denied = AppState::launch(
+        AppConfig {
+            data_dir: install.dir.path().to_owned(),
+        },
+        Arc::new(MemoryStore::unavailable()),
+        install.events.clone(),
+    );
+    assert_eq!(denied.phase().phase, PhaseName::NeedsRecoveryKey);
+    assert!(!denied.phase().secure_store);
+    drop(denied);
+    assert!(install.files().contains(&vault::DATABASE_FILE.to_owned()));
+
+    // Allowed next time: the upgrade proceeds with every note.
+    let app = install.launch();
+    assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_upgraded(&install, &app, &old);
+}
+
+#[tokio::test]
+async fn an_unreadable_database_can_be_started_over() {
+    let install = Install::new();
+    std::fs::write(install.db(), b"not a database at all, just some bytes").unwrap();
 
     let app = install.launch();
-    assert_eq!(app.phase().phase, PhaseName::Unlocked);
-    app.create_note(notes()).unwrap();
-    eventually("the relaunched device to sync", || {
-        let status = app.sync_status().unwrap();
-        status.pending == 0 && status.state == crate::dto::SyncStateDto::Synced
-    })
-    .await;
-    assert!(app.sync_status().unwrap().attention.is_empty());
+    assert_eq!(app.phase().phase, PhaseName::NeedsRecoveryKey);
+    let key = RecoveryKey::generate().unwrap().to_display();
+    assert_eq!(code(app.open_with_recovery_key(&key).await), Code::Internal);
+    app.start_over().await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    assert!(
+        install
+            .files()
+            .iter()
+            .any(|f| f.starts_with("vault.sqlite3.legacy-"))
+    );
+    app.create_notebook().await.unwrap();
+    app.acknowledge_recovery_key().await.unwrap();
 }
 
 #[tokio::test]
-async fn sync_resumes_after_an_offline_unlock() {
-    let mut server = TestServer::start().await;
+async fn a_failed_upgrade_acknowledgment_keeps_everything_and_retries() {
     let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.lock().await.unwrap();
-    server.stop();
-    app.unlock(PASSPHRASE).await.unwrap();
-    app.create_note(notes()).unwrap();
-    server.restart().await;
-    eventually("the edit to sync once online", || {
-        app.pending_count().unwrap() == 0
-    })
-    .await;
-    assert!(app.sync_status().unwrap().attention.is_empty());
-}
-
-#[tokio::test]
-async fn old_passphrase_stops_unlocking_after_a_change_elsewhere() {
-    let mut server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    eventually("the first sync", || {
-        app.sync_status().unwrap().state == crate::dto::SyncStateDto::Synced
-    })
-    .await;
-
-    let other_install = Install::new();
-    let other = other_install.launch();
-    other
-        .sign_in(&server.url, "alice", PASSPHRASE)
-        .await
-        .unwrap();
-    other
-        .change_passphrase(PASSPHRASE, NEW_PASSPHRASE, NEW_PASSPHRASE)
-        .await
-        .unwrap();
-
-    // This device's session ends. It can't fetch the new bundle, so it fails
-    // closed.
-    eventually("sign-in required", || {
-        app.sync_status()
-            .unwrap()
-            .attention
-            .contains(&crate::dto::AttentionDto::SignInRequired)
-    })
-    .await;
-    assert!(!install.has(Entry::LocalUnlock));
-    app.lock().await.unwrap();
-    server.stop();
-    assert_eq!(code(app.unlock(PASSPHRASE).await), Code::Offline);
-    server.restart().await;
-    assert_eq!(code(app.unlock(PASSPHRASE).await), Code::WrongPassphrase);
-    app.unlock(NEW_PASSPHRASE).await.unwrap();
-}
-
-#[tokio::test]
-async fn a_store_failing_partway_leaves_nothing_behind() {
-    let server = TestServer::start().await;
-    let alice_install = Install::new();
-    registered(&server, &alice_install, "alice").await;
-
-    // The session entry is written, then the store stops working.
-    let install = Install::with_store(MemoryStore::fails_after(1));
+    let old = seed_legacy(&install, false);
     let app = install.launch();
-    let phase = app.sign_in(&server.url, "alice", PASSPHRASE).await.unwrap();
-    assert!(!phase.credentials_remembered);
-    assert!(!install.has(Entry::Session), "stranded in the OS store");
+    assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
 
-    // Everything still works from memory for this run.
-    app.lock().await.unwrap();
-    app.unlock(PASSPHRASE).await.unwrap();
-    app.sign_out(true).await.unwrap();
-    assert_eq!(install.launch().phase().phase, PhaseName::SignedOut);
+    // The database is replaced by one for another vault behind the app's
+    // back, so acknowledging can't open it.
+    let path = install.db();
+    let moved = path.with_extension("bak");
+    std::fs::rename(&path, &moved).unwrap();
+    drop(SqliteStorage::open(&path, VaultId::from_parts(9, 9)).unwrap());
+    assert_eq!(code(app.acknowledge_recovery_key().await), Code::Internal);
+    assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
+    for entry in [Entry::Session, Entry::LocalUnlock, Entry::AutoUnlock] {
+        assert!(install.has(entry), "{entry:?}");
+    }
+    assert!(!install.has(Entry::VaultKey));
+
+    // Put back, the same acknowledgment succeeds.
+    SqliteStorage::delete_database(&path).unwrap();
+    std::fs::rename(&moved, &path).unwrap();
+    app.acknowledge_recovery_key().await.unwrap();
+    assert_upgraded(&install, &app, &old);
 }
 
 #[tokio::test]
-async fn collapsed_tags_are_sealed_and_hidden_while_locked() {
-    const TAG: &str = "secret-project-omega";
-    let server = TestServer::start().await;
+async fn an_upgrade_whose_database_wont_open_can_start_over() {
     let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.set_tag_expanded(TAG, false).unwrap();
-    assert_eq!(app.settings().unwrap().collapsed_tags, [TAG]);
-    app.lock().await.unwrap();
+    seed_legacy(&install, false);
+    // A database that peeks as the right vault but won't open: here, one
+    // layout version newer than this build knows.
+    let path = install.db();
+    let mut bytes = std::fs::read(&path).unwrap();
+    // `user_version` is the big-endian u32 at offset 60 of the header.
+    bytes[60..64].copy_from_slice(&99u32.to_be_bytes());
+    std::fs::write(&path, bytes).unwrap();
 
-    assert!(app.settings().unwrap().collapsed_tags.is_empty());
-    assert_eq!(code(app.set_tag_expanded(TAG, true)), Code::Locked);
-    for name in file_names(install.dir.path()) {
+    for _ in 0..2 {
+        let app = install.launch();
+        assert_eq!(app.phase().phase, PhaseName::PendingRecoveryKey);
+        assert_eq!(code(app.acknowledge_recovery_key().await), Code::Internal);
+        app.quit();
+    }
+    let app = install.launch();
+    app.start_over().await.unwrap();
+    assert_eq!(app.phase().phase, PhaseName::Setup);
+    assert!(install.has(Entry::AutoUnlock));
+    assert!(
+        install
+            .files()
+            .iter()
+            .any(|f| f.starts_with("vault.sqlite3.legacy-"))
+    );
+
+    // Not for a new notebook's key screen, which has nothing to set aside.
+    app.create_notebook().await.unwrap();
+    assert_eq!(code(app.start_over().await), Code::NotOpen);
+}
+
+#[tokio::test]
+async fn upgrade_commands_need_their_phase() {
+    let install = Install::new();
+    let (app, _) = created(&install).await;
+    assert_eq!(
+        code(app.upgrade_with_passphrase(OLD_PASSPHRASE).await),
+        Code::NotOpen
+    );
+    assert_eq!(code(app.start_over().await), Code::NotOpen);
+    let key = RecoveryKey::generate().unwrap().to_display();
+    assert_eq!(code(app.open_with_recovery_key(&key).await), Code::NotOpen);
+}
+
+// ---- settings ----
+
+#[tokio::test]
+async fn collapsed_tags_are_sealed_at_rest() {
+    let install = Install::new();
+    let (app, _) = created(&install).await;
+    app.set_tag_expanded("Secret-Project", false).unwrap();
+    assert_eq!(app.settings().unwrap().collapsed_tags, ["secret-project"]);
+    app.quit();
+
+    for name in install.files() {
         let bytes = std::fs::read(install.dir.path().join(&name)).unwrap();
-        assert!(
-            !bytes.windows(TAG.len()).any(|w| w == TAG.as_bytes()),
-            "{name}"
-        );
+        assert!(!bytes.windows(14).any(|w| w == b"secret-project"), "{name}");
     }
-    app.unlock(PASSPHRASE).await.unwrap();
-    assert_eq!(app.settings().unwrap().collapsed_tags, [TAG]);
-}
-
-#[tokio::test]
-async fn sign_out_works_when_the_local_store_is_broken() {
-    let server = TestServer::start().await;
-    let install = Install::new();
-    let app = registered(&server, &install, "alice").await;
-    app.lock().await.unwrap();
-    std::fs::write(install.db(), b"not a database at all").unwrap();
-    for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(install.dir.path().join(format!("vault.sqlite3{suffix}")));
-    }
-    assert_eq!(code(app.sign_out(false).await), Code::PendingChanges);
-    app.sign_out(true).await.unwrap();
-    assert!(!install.db().exists());
-    assert!(!install.has(Entry::Session));
+    let app = install.launch();
+    assert_eq!(app.settings().unwrap().collapsed_tags, ["secret-project"]);
 }

@@ -23,7 +23,7 @@
   let handle = $state<NoteEditorHandle | null>(null)
   let editorError = $state('')
 
-  // Lets lock, sign-out, and trash deliver pending edits first.
+  // Lets trashing the open note deliver its pending edits first.
   $effect(() => {
     const current = handle
     vault.editor = current

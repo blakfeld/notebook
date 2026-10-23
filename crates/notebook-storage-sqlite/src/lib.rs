@@ -18,6 +18,10 @@
 //!   with [`StorageError::Corrupt`] and is left untouched, because its outbox
 //!   may hold unsynced edits. Resetting is the app's call;
 //!   [`SqliteStorage::delete_database`] removes the files.
+//! - **Recovery entry.** The vault's [`RecoveryEntry`] is kept in the file
+//!   ([`SqliteStorage::recovery_entry`]). It opens only with the recovery
+//!   key, so it isn't secret on its own. [`clear`](Storage::clear) removes it
+//!   with the vault binding.
 //! - **Durability.** Writes use WAL with `synchronous=FULL`: once a call
 //!   returns, its change survives a crash or power loss. Each call is one
 //!   transaction.
@@ -27,13 +31,13 @@
 use std::io;
 use std::path::Path;
 
-use notebook_core::crypto::VaultId;
+use notebook_core::crypto::{RecoveryEntry, VaultId};
 use notebook_core::note::NoteId;
 use notebook_core::storage::{
     EntryKind, LocalUpdate, LogEntry, LogPos, OutboxEntry, RemoteBatch, Result, ServerSeq, Storage,
     StorageError, StoredNote, UpdateId,
 };
-use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, params};
 
 mod schema;
 
@@ -42,6 +46,13 @@ mod schema;
 pub struct SqliteStorage {
     conn: Connection,
     vault: VaultId,
+}
+
+/// What [`SqliteStorage::peek`] finds in a store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredVault {
+    pub vault: VaultId,
+    pub recovery_entry: Option<RecoveryEntry>,
 }
 
 /// Maps SQLite errors to [`StorageError`].
@@ -155,6 +166,94 @@ impl SqliteStorage {
         }
         tx.commit().db()?;
         Ok(Self { conn, vault })
+    }
+
+    /// Reads which vault the store at `path` holds, and its recovery entry,
+    /// without changing the file: no migration, no vault binding. `None`
+    /// when there is no file or it isn't bound to a vault yet.
+    pub fn peek(path: impl AsRef<Path>) -> Result<Option<StoredVault>> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).db()?;
+        conn.busy_timeout(std::time::Duration::from_secs(5)).db()?;
+        let has_table = |name: &str| -> Result<bool> {
+            conn.query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()
+            .db()
+            .map(|r| r.is_some())
+        };
+        if !has_table("meta")? {
+            return Ok(None);
+        }
+        let Some(bytes) = conn
+            .query_row("SELECT value FROM meta WHERE key = 'vault_id'", [], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .optional()
+            .db()?
+        else {
+            return Ok(None);
+        };
+        let bytes: [u8; 16] = bytes.try_into().map_err(|_| StorageError::Corrupt)?;
+        let recovery_entry = if has_table("vault_meta")? {
+            conn.query_row(
+                "SELECT recovery_entry FROM vault_meta WHERE id = 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()
+            .db()?
+            .map(|b| RecoveryEntry::from_bytes(&b).map_err(|_| StorageError::Corrupt))
+            .transpose()?
+        } else {
+            None
+        };
+        Ok(Some(StoredVault {
+            vault: VaultId::from_bytes(bytes),
+            recovery_entry,
+        }))
+    }
+
+    /// The vault's recovery entry, if one has been stored. Bytes that don't
+    /// parse are [`StorageError::Corrupt`].
+    pub fn recovery_entry(&self) -> Result<Option<RecoveryEntry>> {
+        let bytes: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT recovery_entry FROM vault_meta WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .db()?;
+        bytes
+            .map(|b| RecoveryEntry::from_bytes(&b).map_err(|_| StorageError::Corrupt))
+            .transpose()
+    }
+
+    /// Stores `entry`, replacing any earlier one. It must belong to this
+    /// store's vault, or the call fails with [`StorageError::VaultMismatch`].
+    pub fn set_recovery_entry(&mut self, entry: &RecoveryEntry) -> Result<()> {
+        if entry.vault_id() != self.vault {
+            return Err(StorageError::VaultMismatch {
+                stored: self.vault,
+                requested: entry.vault_id(),
+            });
+        }
+        self.conn
+            .execute(
+                "INSERT INTO vault_meta (id, recovery_entry) VALUES (1, ?1)
+                 ON CONFLICT (id) DO UPDATE SET recovery_entry = excluded.recovery_entry",
+                [entry.to_bytes()],
+            )
+            .db()?;
+        Ok(())
     }
 
     /// Removes the store at `path` and its `-wal`, `-shm`, and `-journal` files, settings
@@ -463,6 +562,7 @@ impl Storage for SqliteStorage {
         tx.execute_batch(
             "DELETE FROM log;
              DELETE FROM notes;
+             DELETE FROM vault_meta;
              DELETE FROM meta WHERE key IN ('vault_id', 'cursor');",
         )
         .db()?;
@@ -493,6 +593,7 @@ impl Storage for SqliteStorage {
 
 #[cfg(test)]
 mod tests {
+    use notebook_core::crypto::{RecoveryKey, VaultKey};
     use notebook_core::storage::RemoteEntry;
 
     use super::*;
@@ -526,11 +627,145 @@ mod tests {
     }
 
     #[test]
-    fn fresh_store_has_version_one_layout() {
+    fn fresh_store_has_version_two_layout() {
         let s = SqliteStorage::open_in_memory(vault()).unwrap();
+        assert_eq!(schema::version(&s.conn).unwrap(), 2);
+        assert_eq!(schema::MIGRATIONS.len(), 2);
+        assert_eq!(
+            tables(&s.conn),
+            ["log", "meta", "notes", "settings", "vault_meta"]
+        );
+    }
+
+    fn recovery_entry() -> (RecoveryEntry, RecoveryKey) {
+        let recovery = RecoveryKey::generate().unwrap();
+        let entry =
+            RecoveryEntry::create(vault(), &VaultKey::generate().unwrap(), &recovery).unwrap();
+        (entry, recovery)
+    }
+
+    #[test]
+    fn recovery_entry_round_trips_and_survives_reopening() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let mut s = SqliteStorage::open(&path, vault()).unwrap();
+        assert_eq!(s.recovery_entry().unwrap(), None);
+
+        let (first, _) = recovery_entry();
+        s.set_recovery_entry(&first).unwrap();
+        assert_eq!(s.recovery_entry().unwrap().as_ref(), Some(&first));
+
+        let (second, recovery) = recovery_entry();
+        s.set_recovery_entry(&second).unwrap();
+        drop(s);
+
+        let s = SqliteStorage::open(&path, vault()).unwrap();
+        let stored = s.recovery_entry().unwrap().unwrap();
+        assert_eq!(stored, second);
+        assert!(stored.open(&recovery).is_ok());
+    }
+
+    #[test]
+    fn recovery_entry_for_another_vault_is_refused() {
+        let mut s = SqliteStorage::open_in_memory(vault()).unwrap();
+        let entry = RecoveryEntry::create(
+            VaultId::from_parts(1_000, 2),
+            &VaultKey::generate().unwrap(),
+            &RecoveryKey::generate().unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            s.set_recovery_entry(&entry),
+            Err(StorageError::VaultMismatch { .. })
+        ));
+        assert_eq!(s.recovery_entry().unwrap(), None);
+    }
+
+    #[test]
+    fn unparsable_recovery_entry_is_corrupt() {
+        let s = SqliteStorage::open_in_memory(vault()).unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO vault_meta (id, recovery_entry) VALUES (1, x'00')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(s.recovery_entry(), Err(StorageError::Corrupt));
+    }
+
+    #[test]
+    fn clear_removes_the_recovery_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let mut s = SqliteStorage::open(&path, vault()).unwrap();
+        s.set_recovery_entry(&recovery_entry().0).unwrap();
+        s.clear().unwrap();
+        let s = SqliteStorage::open(&path, vault()).unwrap();
+        assert_eq!(s.recovery_entry().unwrap(), None);
+    }
+
+    #[test]
+    fn peek_reads_without_changing_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        assert_eq!(SqliteStorage::peek(&path).unwrap(), None);
+        assert!(!path.exists());
+
+        // A version-one store: a vault, no recovery entry, and no upgrade.
+        let conn = Connection::open(&path).unwrap();
+        let s = SqliteStorage::open_with(conn, vault(), &schema::MIGRATIONS[..1]).unwrap();
+        drop(s);
+        let peeked = SqliteStorage::peek(&path).unwrap().unwrap();
+        assert_eq!(peeked.vault, vault());
+        assert_eq!(peeked.recovery_entry, None);
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(schema::version(&conn).unwrap(), 1);
+        drop(conn);
+
+        let mut s = SqliteStorage::open(&path, vault()).unwrap();
+        let (entry, _) = recovery_entry();
+        s.set_recovery_entry(&entry).unwrap();
+        // Peeking while the store is open, as the app never does but may.
+        let peeked = SqliteStorage::peek(&path).unwrap().unwrap();
+        assert_eq!(peeked.recovery_entry, Some(entry));
+        s.clear().unwrap();
+        assert_eq!(SqliteStorage::peek(&path).unwrap(), None);
+    }
+
+    /// A version-one store, as a signed-in install left it, upgrades with
+    /// every note, outbox entry, cursor, and setting intact and an empty
+    /// recovery entry slot.
+    #[test]
+    fn version_one_store_upgrades_to_version_two() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.sqlite3");
+        let conn = Connection::open(&path).unwrap();
+        let mut s = SqliteStorage::open_with(conn, vault(), &schema::MIGRATIONS[..1]).unwrap();
         assert_eq!(schema::version(&s.conn).unwrap(), 1);
-        assert_eq!(schema::MIGRATIONS.len(), 1);
-        assert_eq!(tables(&s.conn), ["log", "meta", "notes", "settings"]);
+        s.create_note(note(1), b"key", local(1)).unwrap();
+        s.append_local(note(1), local(2)).unwrap();
+        s.acknowledge(UpdateId([1; 16]), ServerSeq(3)).unwrap();
+        s.apply_remote(RemoteBatch {
+            keys: vec![],
+            entries: vec![],
+            cursor: ServerSeq(3),
+        })
+        .unwrap();
+        s.set_setting("editor.vim", "true").unwrap();
+        let loaded = s.load_note(note(1)).unwrap();
+        let outbox = s.outbox().unwrap();
+        drop(s);
+
+        let mut s = SqliteStorage::open(&path, vault()).unwrap();
+        assert_eq!(schema::version(&s.conn).unwrap(), 2);
+        assert_eq!(s.list_notes().unwrap(), [note(1)]);
+        assert_eq!(s.load_note(note(1)).unwrap(), loaded);
+        assert_eq!(s.outbox().unwrap(), outbox);
+        assert_eq!(s.cursor().unwrap(), ServerSeq(3));
+        assert_eq!(s.setting("editor.vim").unwrap().as_deref(), Some("true"));
+        assert_eq!(s.recovery_entry().unwrap(), None);
+        s.set_recovery_entry(&recovery_entry().0).unwrap();
+        assert!(s.recovery_entry().unwrap().is_some());
     }
 
     #[test]
@@ -558,12 +793,15 @@ mod tests {
         let outbox = s.outbox().unwrap();
         drop(s);
 
-        let v2 = "CREATE TABLE extra (x INTEGER) STRICT;
-                  ALTER TABLE notes ADD COLUMN extra INTEGER;";
-        let migrations = [schema::MIGRATIONS[0], v2];
+        let next = "CREATE TABLE extra (x INTEGER) STRICT;
+                    ALTER TABLE notes ADD COLUMN extra INTEGER;";
+        let migrations = [schema::MIGRATIONS, &[next]].concat();
         let conn = Connection::open(&path).unwrap();
         let s = SqliteStorage::open_with(conn, vault(), &migrations).unwrap();
-        assert_eq!(schema::version(&s.conn).unwrap(), 2);
+        assert_eq!(
+            schema::version(&s.conn).unwrap() as usize,
+            schema::MIGRATIONS.len() + 1
+        );
         assert!(tables(&s.conn).contains(&"extra".to_owned()));
         assert_eq!(s.list_notes().unwrap(), [note(1), note(2)]);
         assert_eq!([note(1), note(2)].map(|id| s.load_note(id).unwrap()), notes);

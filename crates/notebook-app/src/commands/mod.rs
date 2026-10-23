@@ -5,9 +5,7 @@
 use tauri::State;
 use zeroize::Zeroizing;
 
-use crate::dto::{
-    ExportResultDto, ListEntryDto, PhaseDto, SelectionDto, SettingsDto, SyncStatusDto, TagNodeDto,
-};
+use crate::dto::{ExportResultDto, ListEntryDto, PhaseDto, SelectionDto, SettingsDto, TagNodeDto};
 use crate::editor::OpenedDto;
 use crate::error::AppError;
 use crate::export::Picker;
@@ -21,105 +19,52 @@ pub fn core_version() -> &'static str {
     notebook_core::version()
 }
 
-// ---- app and account ----
+// ---- app and notebook ----
 
 #[tauri::command]
 pub async fn app_state(state: State<'_, AppState>) -> Result<PhaseDto> {
     Ok(state.phase())
 }
 
+/// Returns the new recovery key's display form.
 #[tauri::command]
-pub async fn sign_in(
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
-    passphrase: String,
-) -> Result<PhaseDto> {
-    let passphrase = Zeroizing::new(passphrase);
-    state.sign_in(&server, &username, &passphrase).await
+pub async fn create_notebook(state: State<'_, AppState>) -> Result<String> {
+    Ok(state.create_notebook().await?.to_string())
+}
+
+/// The recovery key waiting to be acknowledged, e.g. after an upgrade
+/// generated it at launch.
+#[tauri::command]
+pub async fn pending_recovery_key(state: State<'_, AppState>) -> Result<String> {
+    Ok(state.pending_recovery_key()?.to_string())
 }
 
 #[tauri::command]
-pub async fn generate_recovery_key(state: State<'_, AppState>) -> Result<String> {
-    Ok(state.generate_recovery_key()?.to_string())
+pub async fn acknowledge_recovery_key(state: State<'_, AppState>) -> Result<PhaseDto> {
+    state.acknowledge_recovery_key().await
 }
 
 #[tauri::command]
-pub async fn register(
+pub async fn open_with_recovery_key(
     state: State<'_, AppState>,
-    server: String,
-    username: String,
-    passphrase: String,
-    confirm: String,
-    invite_code: String,
-) -> Result<PhaseDto> {
-    let (passphrase, confirm) = (Zeroizing::new(passphrase), Zeroizing::new(confirm));
-    state
-        .register(&server, &username, &passphrase, &confirm, &invite_code)
-        .await
-}
-
-#[tauri::command]
-pub async fn recover(
-    state: State<'_, AppState>,
-    server: String,
-    username: String,
     recovery_key: String,
-    passphrase: String,
-    confirm: String,
 ) -> Result<PhaseDto> {
     let recovery_key = Zeroizing::new(recovery_key);
-    let (passphrase, confirm) = (Zeroizing::new(passphrase), Zeroizing::new(confirm));
-    state
-        .recover(&server, &username, &recovery_key, &passphrase, &confirm)
-        .await
+    state.open_with_recovery_key(&recovery_key).await
 }
 
 #[tauri::command]
-pub async fn unlock(state: State<'_, AppState>, passphrase: String) -> Result<PhaseDto> {
-    let passphrase = Zeroizing::new(passphrase);
-    state.unlock(&passphrase).await
-}
-
-#[tauri::command]
-pub async fn lock(state: State<'_, AppState>) -> Result<PhaseDto> {
-    state.lock().await
-}
-
-#[tauri::command]
-pub async fn reauthenticate(state: State<'_, AppState>, passphrase: String) -> Result<()> {
-    let passphrase = Zeroizing::new(passphrase);
-    state.reauthenticate(&passphrase).await
-}
-
-#[tauri::command]
-pub async fn change_passphrase(
+pub async fn upgrade_with_passphrase(
     state: State<'_, AppState>,
-    current: String,
-    new: String,
-    confirm: String,
-) -> Result<()> {
-    let (current, new, confirm) = (
-        Zeroizing::new(current),
-        Zeroizing::new(new),
-        Zeroizing::new(confirm),
-    );
-    state.change_passphrase(&current, &new, &confirm).await
+    passphrase: String,
+) -> Result<PhaseDto> {
+    let passphrase = Zeroizing::new(passphrase);
+    state.upgrade_with_passphrase(&passphrase).await
 }
 
 #[tauri::command]
-pub async fn sign_out(state: State<'_, AppState>, confirm: bool) -> Result<PhaseDto> {
-    state.sign_out(confirm).await
-}
-
-#[tauri::command]
-pub async fn pending_count(state: State<'_, AppState>) -> Result<usize> {
-    state.pending_count()
-}
-
-#[tauri::command]
-pub async fn sync_status(state: State<'_, AppState>) -> Result<SyncStatusDto> {
-    state.sync_status()
+pub async fn start_over(state: State<'_, AppState>) -> Result<PhaseDto> {
+    state.start_over().await
 }
 
 // ---- vault ----
@@ -160,7 +105,7 @@ pub async fn set_trashed(state: State<'_, AppState>, id: String, trashed: bool) 
 
 #[tauri::command]
 pub async fn delete_permanently(state: State<'_, AppState>, id: String) -> Result<()> {
-    state.delete_permanently(&id).await
+    state.delete_permanently(&id)
 }
 
 #[tauri::command]

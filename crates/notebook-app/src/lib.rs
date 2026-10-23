@@ -1,7 +1,7 @@
 //! Tauri host for the Notebook frontend.
 //!
-//! The webview is a view: keys, decrypted notes, storage, sync, and
-//! networking all live here, in [`state::AppState`].
+//! The webview is a view: keys, decrypted notes, and storage all live here,
+//! in [`state::AppState`]. Nothing here uses the network.
 
 mod commands;
 mod credentials;
@@ -10,8 +10,6 @@ mod editor;
 mod error;
 mod events;
 mod export;
-#[cfg(test)]
-mod integration_tests;
 mod notes;
 mod state;
 mod vault;
@@ -21,8 +19,6 @@ mod vault_tests;
 use std::path::Path;
 use std::sync::Arc;
 
-use notebook_core::auth::Device;
-use notebook_core::auth::api::SessionKind;
 use tauri::{Builder, Context, Manager, Runtime};
 
 use crate::credentials::KeyringStore;
@@ -35,17 +31,12 @@ fn register<R: Runtime>(builder: Builder<R>) -> Builder<R> {
     builder.invoke_handler(tauri::generate_handler![
         commands::core_version,
         commands::app_state,
-        commands::sign_in,
-        commands::generate_recovery_key,
-        commands::register,
-        commands::recover,
-        commands::unlock,
-        commands::lock,
-        commands::reauthenticate,
-        commands::change_passphrase,
-        commands::sign_out,
-        commands::pending_count,
-        commands::sync_status,
+        commands::create_notebook,
+        commands::pending_recovery_key,
+        commands::acknowledge_recovery_key,
+        commands::open_with_recovery_key,
+        commands::upgrade_with_passphrase,
+        commands::start_over,
         commands::tag_tree,
         commands::list_notes,
         commands::create_note,
@@ -91,13 +82,6 @@ fn write_install_id(path: &Path) -> std::io::Result<String> {
     Ok(id)
 }
 
-fn device() -> Device {
-    Device {
-        name: format!("Notebook on {}", std::env::consts::OS),
-        kind: SessionKind::Native,
-    }
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     register(Builder::default())
@@ -107,11 +91,7 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let creds = Arc::new(KeyringStore::new(&install_id(&data_dir)?));
-            let config = AppConfig {
-                data_dir,
-                sync: Default::default(),
-                device: device(),
-            };
+            let config = AppConfig { data_dir };
             let emitter = Arc::new(TauriEmitter(app.handle().clone()));
             app.manage(AppState::launch(config, creds, emitter));
             // Mobile exports through the share sheet (`mobile-app`).
@@ -235,13 +215,15 @@ pub(crate) mod tests {
 
     use serde_json::{Value, json};
 
+    use crate::credentials::{self, CredentialStore};
+    use crate::state::tests::{Install, created, notes};
+
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use futures::future::BoxFuture;
 
     use crate::export::{FolderPicker, Picker};
-    use crate::state::tests::{Install, PASSPHRASE, TestServer, notes, registered};
 
     /// A folder picker that answers `folder` and counts how often it opened.
     struct StubPicker {
@@ -315,33 +297,52 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn app_state_for_each_launch_case() {
-        // No entry: signed out.
+        // Nothing on the device: the welcome screen.
         let install = Install::new();
-        let (_app, webview) = mock_app(install.launch());
-        assert_eq!(
-            call(&webview, "app_state", json!({})).unwrap()["phase"],
-            "signed_out"
-        );
-
-        // Session and auto-unlock entries: unlocked without a passphrase.
-        let server = TestServer::start().await;
-        let install = Install::new();
-        registered(&server, &install, "alice").await.quit().await;
         let (_app, webview) = mock_app(install.launch());
         let phase = call(&webview, "app_state", json!({})).unwrap();
-        assert_eq!(phase["phase"], "unlocked");
-        assert_eq!(phase["account"]["username"], "alice");
-        assert_eq!(phase["credentials_remembered"], true);
+        assert_eq!(
+            phase,
+            json!({"phase": "setup", "secure_store": true, "upgrade": false})
+        );
 
-        // Session without auto-unlock: locked.
-        call(&webview, "lock", json!({})).unwrap();
+        // Create, read the key back while pending, acknowledge.
+        let key = call(&webview, "create_notebook", json!({})).unwrap();
+        assert_eq!(key.as_str().unwrap().len(), 39);
+        assert_eq!(
+            call(&webview, "pending_recovery_key", json!({})).unwrap(),
+            key
+        );
+        let phase = call(&webview, "acknowledge_recovery_key", json!({})).unwrap();
+        assert_eq!(phase["phase"], "open");
+        assert_eq!(
+            call(&webview, "pending_recovery_key", json!({})).unwrap_err()["code"],
+            "not_open"
+        );
+        drop(webview);
+        drop(_app);
+
+        // Relaunch: open with no prompt.
         let (_app, webview) = mock_app(install.launch());
         assert_eq!(
             call(&webview, "app_state", json!({})).unwrap()["phase"],
-            "locked"
+            "open"
         );
-        let phase = call(&webview, "unlock", json!({"passphrase": PASSPHRASE})).unwrap();
-        assert_eq!(phase["phase"], "unlocked");
+
+        // Without the keychain entry: the recovery key opens it.
+        install.creds.delete(credentials::Entry::VaultKey).unwrap();
+        let (_app, webview) = mock_app(install.launch());
+        assert_eq!(
+            call(&webview, "app_state", json!({})).unwrap()["phase"],
+            "needs_recovery_key"
+        );
+        let phase = call(
+            &webview,
+            "open_with_recovery_key",
+            json!({"recoveryKey": key}),
+        )
+        .unwrap();
+        assert_eq!(phase["phase"], "open");
     }
 
     #[tokio::test]
@@ -350,18 +351,37 @@ pub(crate) mod tests {
         let (_app, webview) = mock_app(install.launch());
         let err = call(
             &webview,
-            "sign_in",
-            json!({"server": "http://notes.example.com", "username": "a", "passphrase": "b"}),
-        )
-        .unwrap_err();
-        assert_eq!(err["code"], "invalid_server_url");
-        let err = call(
-            &webview,
             "list_notes",
             json!({"selection": {"view": "notes"}, "query": ""}),
         )
         .unwrap_err();
-        assert_eq!(err["code"], "locked");
+        assert_eq!(err["code"], "not_open");
+        let err = call(
+            &webview,
+            "open_with_recovery_key",
+            json!({"recoveryKey": "not a key"}),
+        )
+        .unwrap_err();
+        assert_eq!(err["code"], "recovery_key_malformed");
+    }
+
+    #[test]
+    fn removed_account_and_sync_commands_are_gone() {
+        for cmd in [
+            "sign_in",
+            "register",
+            "recover",
+            "unlock",
+            "lock",
+            "reauthenticate",
+            "change_passphrase",
+            "sign_out",
+            "pending_count",
+            "sync_status",
+            "generate_recovery_key",
+        ] {
+            assert!(invoke(cmd, InvokeBody::default()).is_err(), "{cmd}");
+        }
     }
 
     fn file_names(dir: &Path) -> Vec<String> {
@@ -374,22 +394,21 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn export_is_refused_while_locked() {
+    async fn export_is_refused_until_the_notebook_is_open() {
         let install = Install::new();
         let parent = tempfile::tempdir().unwrap();
         let picker = StubPicker::new(Some(parent.path().to_owned()));
         let (_app, webview) = mock_app_with_picker(install.launch(), picker.clone());
         let err = call(&webview, "export_notes", json!({"includeTrashed": false})).unwrap_err();
-        assert_eq!(err["code"], "locked");
+        assert_eq!(err["code"], "not_open");
         assert_eq!(picker.opened(), 0);
         assert!(file_names(parent.path()).is_empty());
     }
 
     #[tokio::test]
     async fn export_writes_into_the_picked_folder() {
-        let server = TestServer::start().await;
         let install = Install::new();
-        let state = registered(&server, &install, "alice").await;
+        let (state, _) = created(&install).await;
         let mut ids = Vec::new();
         for body in ["Ideas", "Ideas", "Old #work/acme", "Gone"] {
             let id = state.create_note(notes()).unwrap();
@@ -430,9 +449,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn cancelled_export_writes_nothing() {
-        let server = TestServer::start().await;
         let install = Install::new();
-        let state = registered(&server, &install, "alice").await;
+        let (state, _) = created(&install).await;
         let (_app, webview) = mock_app(state);
         let result = call(&webview, "export_notes", json!({"includeTrashed": false})).unwrap();
         assert_eq!(result, Value::Null);

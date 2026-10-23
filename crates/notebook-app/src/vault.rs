@@ -1,156 +1,108 @@
-//! An unlocked vault's runtime: the SQLite store, the replica, the sync
-//! engine on its own thread, and the channels the host drains.
-//!
-//! The engine isn't `Send`, so it is built and run on a dedicated thread
-//! with a current-thread tokio runtime. Only the shared replica, the token
-//! state, and channel ends cross threads.
+//! An open vault's runtime: the SQLite store, the replica over it, and the
+//! workspace the commands use. There is no sync engine and no network:
+//! every edit is written to the store by the replica before it returns.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc as std_mpsc;
-use std::thread::JoinHandle;
-use std::time::Duration;
 
 use futures::channel::mpsc;
-use notebook_core::auth::NativeAuthHttp;
-use notebook_core::auth::http::{AuthClient, AuthSession, SessionTokens};
 use notebook_core::crypto::{VaultId, VaultKey};
-use notebook_core::storage::StorageError;
-use notebook_core::sync::{
-    NativeTransport, Replica, Shared, SyncConfig, SyncEngine, SyncEvent, SyncHandle, TokioTimer,
-};
-use notebook_core::workspace::{Changed, ServerUrl, Workspace};
+use notebook_core::sync::{Replica, Shared};
+use notebook_core::workspace::{Changed, Workspace};
 use notebook_storage_sqlite::SqliteStorage;
 
 use crate::error::{AppError, AppResult};
 
 pub const DATABASE_FILE: &str = "vault.sqlite3";
 
+/// SQLite's companion files, which move with the database. The main file
+/// comes last, and an I/O error part way moves everything back, so a failed
+/// move never leaves a database at the old path missing its WAL. (A crash
+/// between two renames still can; the window is tiny, and a WAL with
+/// content only exists after an earlier crash.)
+const COMPANIONS: [&str; 4] = ["-wal", "-shm", "-journal", ""];
+
 pub fn database_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DATABASE_FILE)
 }
 
-/// Opens the vault's store. With `replace_other`, a database left by a
-/// different vault (an earlier account on this install) is deleted first.
-pub fn open_storage(path: &Path, vault: VaultId, replace_other: bool) -> AppResult<SqliteStorage> {
-    match SqliteStorage::open(path, vault) {
-        Err(StorageError::VaultMismatch { .. }) if replace_other => {
-            SqliteStorage::delete_database(path).map_err(AppError::internal)?;
-            Ok(SqliteStorage::open(path, vault)?)
-        }
-        other => Ok(other?),
-    }
+pub fn open_storage(path: &Path, vault: VaultId) -> AppResult<SqliteStorage> {
+    Ok(SqliteStorage::open(path, vault)?)
 }
 
-/// What the host gets from a started vault.
-pub struct Started {
-    pub workspace: Workspace<SqliteStorage>,
-    pub changes: mpsc::UnboundedReceiver<Changed>,
-    pub events: mpsc::UnboundedReceiver<SyncEvent>,
-    /// A message after each storage rebuild (server restore resync).
-    pub resynced: mpsc::UnboundedReceiver<()>,
-    pub engine: EngineThread,
-}
-
-/// The engine's thread. Dropping this doesn't stop it; call
-/// [`stop`](Self::stop).
-pub struct EngineThread {
-    handle: SyncHandle,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl EngineThread {
-    /// Shuts the engine down and waits up to `wait` for its thread (and with
-    /// it the replica and the store) to finish. Returns whether it did.
-    pub fn stop(mut self, wait: Duration) -> bool {
-        self.handle.shutdown();
-        let Some(thread) = self.thread.take() else {
-            return true;
-        };
-        let (done_tx, done_rx) = std_mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = thread.join();
-            let _ = done_tx.send(());
-        });
-        done_rx.recv_timeout(wait).is_ok()
-    }
-}
-
-/// Opens the replica over `storage` and starts its engine against `server`.
-pub fn start(
+/// Opens the replica over `storage` and the workspace over it. Returns the
+/// workspace and its change stream.
+pub fn open(
     storage: SqliteStorage,
-    db_path: PathBuf,
-    vault: VaultId,
     vault_key: VaultKey,
-    server: ServerUrl,
-    tokens: SessionTokens,
-    config: SyncConfig,
-) -> AppResult<Started> {
+) -> AppResult<(Workspace<SqliteStorage>, mpsc::UnboundedReceiver<Changed>)> {
     let replica = Shared::new(Replica::open(storage, vault_key)?);
-    let (resynced_tx, resynced) = mpsc::unbounded();
-    let reopen = move || {
-        let store = SqliteStorage::open(&db_path, vault);
-        let _ = resynced_tx.unbounded_send(());
-        store
+    Ok(Workspace::open_local(replica))
+}
+
+/// Moves the database at `path` (with its companion files) aside to
+/// `<name>.legacy-<stamp>`, never deleting it. Returns the new path, or
+/// `None` when there was nothing to move. On failure the files already
+/// moved are moved back. The store must not be open.
+pub fn set_aside(path: &Path, stamp: i64) -> AppResult<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let with = |base: &Path, suffix: &str| {
+        let mut name = base.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
     };
-
-    let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
-    let engine_replica = replica.clone();
-    let thread = std::thread::Builder::new()
-        .name("notebook-sync".into())
-        .spawn(move || {
-            let runtime = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(runtime) => runtime,
-                Err(err) => {
-                    let _ = ready_tx.send(Err(AppError::internal(err)));
-                    return;
+    let target = with(path, &format!(".legacy-{stamp}"));
+    let mut moved = Vec::new();
+    for suffix in COMPANIONS {
+        let (from, to) = (with(path, suffix), with(&target, suffix));
+        match std::fs::rename(&from, &to) {
+            Ok(()) => moved.push((from, to)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                for (from, to) in moved.into_iter().rev() {
+                    let _ = std::fs::rename(to, from);
                 }
-            };
-            runtime.block_on(async move {
-                let parts = NativeTransport::new(server.as_str())
-                    .map_err(AppError::internal)
-                    .and_then(|transport| {
-                        let http =
-                            NativeAuthHttp::new(server.clone()).map_err(AppError::internal)?;
-                        Ok((transport, http))
-                    });
-                let (transport, http) = match parts {
-                    Ok(parts) => parts,
-                    Err(err) => {
-                        let _ = ready_tx.send(Err(err));
-                        return;
-                    }
-                };
-                let timer = TokioTimer::new();
-                let session = AuthSession::new(AuthClient::new(http), tokens, timer);
-                let (engine, handle, events) = SyncEngine::new(
-                    engine_replica,
-                    transport,
-                    timer,
-                    session,
-                    config,
-                    Box::new(reopen),
-                );
-                let _ = ready_tx.send(Ok((handle, events)));
-                engine.run().await;
-            });
-        })
-        .map_err(AppError::internal)?;
-    let (handle, events) = ready_rx
-        .recv()
-        .map_err(|_| AppError::internal("the sync thread exited"))??;
+                return Err(AppError::internal(err));
+            }
+        }
+    }
+    Ok(Some(target))
+}
 
-    let (workspace, changes) = Workspace::open(replica, handle.clone());
-    Ok(Started {
-        workspace,
-        changes,
-        events,
-        resynced,
-        engine: EngineThread {
-            handle,
-            thread: Some(thread),
-        },
-    })
+#[cfg(test)]
+mod tests {
+    use notebook_core::sync::{Replica, Shared};
+
+    use super::*;
+    use crate::state::now;
+
+    /// A database whose last writes are still only in its WAL moves with
+    /// it, and the moved copy reads them back.
+    #[test]
+    fn set_aside_moves_the_wal_with_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = database_path(dir.path());
+        let vault = VaultId::from_parts(3, 3);
+        let key = VaultKey::generate().unwrap();
+        let copy = VaultKey::from_secret_bytes(&*key.to_secret_bytes()).unwrap();
+        let replica = Shared::new(Replica::open(open_storage(&path, vault).unwrap(), key).unwrap());
+        let id = replica
+            .lock()
+            .create_note("kept in the WAL", now())
+            .unwrap();
+        // Never closed, as after a crash: nothing is checkpointed.
+        std::mem::forget(replica);
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        assert!(PathBuf::from(&wal).exists());
+
+        let moved = set_aside(&path, 42).unwrap().unwrap();
+        assert!(!path.exists());
+        assert!(!PathBuf::from(&wal).exists());
+        let replica = Replica::open(open_storage(&moved, vault).unwrap(), copy).unwrap();
+        assert_eq!(replica.note(id).unwrap().body(), "kept in the WAL");
+
+        assert_eq!(set_aside(&path, 43).unwrap(), None);
+    }
 }

@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { View } from '../../platform'
   import { useVault } from '../state'
-  import SyncIndicator from './SyncIndicator.svelte'
   import TagTree from './TagTree.svelte'
   import { TagRenamer } from './tagRename.svelte'
 
@@ -12,7 +11,7 @@
   let { onOpenSettings }: Props = $props()
 
   const vault = useVault()
-  const { selection, notes, sync } = vault
+  const { selection, notes } = vault
   const renamer = new TagRenamer(vault)
 
   const VIEWS: { view: View; label: string }[] = [
@@ -73,7 +72,8 @@
     {/if}
   </nav>
   <footer>
-    <SyncIndicator status={sync.status} />
+    <!-- The status slot: `vault-backup` shows the backup status here. -->
+    <div class="status"></div>
     <button
       type="button"
       class="plain settings"
@@ -136,6 +136,11 @@
     justify-content: space-between;
     padding: 0.5rem 0.75rem;
     border-top: 1px solid var(--border);
+  }
+
+  .status {
+    min-width: 0;
+    font-size: 0.85rem;
   }
 
   .settings {

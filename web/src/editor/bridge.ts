@@ -64,7 +64,7 @@ export interface OpenNoteDoc {
 
 /**
  * A push the core will never accept: the note was deleted or trashed, or
- * the vault locked. The editor drops the update instead of retrying, and
+ * the notebook isn't open. The editor drops the update instead of retrying, and
  * detaches.
  */
 export class NoteClosedError extends Error {

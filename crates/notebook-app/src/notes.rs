@@ -1,7 +1,7 @@
-//! Vault operations over the unlocked workspace. All of them fail with
-//! `locked` unless the vault is open.
+//! Vault operations over the open workspace. All of them fail with
+//! `not_open` unless the notebook is open.
 
-use crate::dto::{ListEntryDto, SelectionDto, SyncStatusDto, TagNodeDto, parse_note_id};
+use crate::dto::{ListEntryDto, SelectionDto, TagNodeDto, parse_note_id};
 use crate::error::AppResult;
 use crate::state::{AppState, now};
 
@@ -49,28 +49,15 @@ impl AppState {
         self.with_vault(|u| Ok(u.workspace.set_trashed(id, trashed)?))
     }
 
-    /// Deletes a trashed note on the server and then here. Needs a
-    /// connection; offline it fails with `offline` and nothing changes.
-    pub async fn delete_permanently(&self, id: &str) -> AppResult<()> {
+    /// Deletes a trashed note from this device at once. Backups taken
+    /// earlier still contain it.
+    pub fn delete_permanently(&self, id: &str) -> AppResult<()> {
         let id = parse_note_id(id)?;
-        let purge = self.with_vault(|u| Ok(u.workspace.purge(id)?))?;
-        purge.await?;
-        // Locked meanwhile: the next unlock reads the store fresh.
-        let _ = self.with_vault(|u| {
-            u.workspace.refresh(&[id]);
-            // Freed space: a push paused by a full quota can retry now.
-            u.workspace.sync().wake();
-            Ok(())
-        });
-        Ok(())
+        self.with_vault(|u| Ok(u.workspace.delete_permanently(id)?))
     }
 
     /// Returns how many notes were rewritten.
     pub fn rename_tag(&self, old: &str, new: &str) -> AppResult<usize> {
         self.with_vault(|u| Ok(u.workspace.rename_tag(old, new, now())?))
-    }
-
-    pub fn sync_status(&self) -> AppResult<SyncStatusDto> {
-        self.with_vault(|u| Ok(u.status.clone()))
     }
 }

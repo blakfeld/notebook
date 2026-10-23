@@ -2,7 +2,6 @@
 //! times as Unix milliseconds.
 
 use notebook_core::note::NoteId;
-use notebook_core::sync::{Attention, SyncState, SyncStatus};
 use notebook_core::tags::{TagNode, TagPath, View};
 use notebook_core::workspace::{Changed, ListEntry, Selection};
 use serde::{Deserialize, Serialize};
@@ -12,15 +11,15 @@ use crate::error::{AppError, AppResult, Code};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseName {
-    SignedOut,
-    Locked,
-    Unlocked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct AccountDto {
-    pub server: String,
-    pub username: String,
+    /// No notebook on this device: the welcome screen.
+    Setup,
+    /// A recovery key was generated and is waiting to be acknowledged.
+    PendingRecoveryKey,
+    /// A notebook exists but its key isn't in the secure store.
+    NeedsRecoveryKey,
+    /// Upgrading a locked server-backed install: the old passphrase opens it.
+    NeedsOldPassphrase,
+    Open,
 }
 
 /// The `app_state` result and the `app-phase-changed` payload. Never holds
@@ -28,10 +27,12 @@ pub struct AccountDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PhaseDto {
     pub phase: PhaseName,
-    pub account: Option<AccountDto>,
-    /// False when there is no OS secure store, so the user will have to sign
-    /// in again next launch.
-    pub credentials_remembered: bool,
+    /// False when the OS has no usable secure store, so the vault key isn't
+    /// remembered and the recovery key is asked for at each launch.
+    pub secure_store: bool,
+    /// True while converting a server-backed install, so the screens can
+    /// say that the old recovery key no longer matters.
+    pub upgrade: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,73 +136,6 @@ pub struct ExportResultDto {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncStateDto {
-    Synced,
-    Syncing,
-    Offline,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AttentionDto {
-    SignInRequired,
-    UpgradeRequired,
-    QuotaFull,
-    UpdateTooLarge,
-    PushBlocked,
-    IntegrityWarning,
-}
-
-/// The `sync-status` payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SyncStatusDto {
-    pub state: SyncStateDto,
-    pub pending: usize,
-    pub attention: Vec<AttentionDto>,
-}
-
-impl From<&SyncStatus> for SyncStatusDto {
-    fn from(status: &SyncStatus) -> Self {
-        let state = match status.state {
-            SyncState::Synced => SyncStateDto::Synced,
-            SyncState::Syncing => SyncStateDto::Syncing,
-            SyncState::Offline => SyncStateDto::Offline,
-        };
-        let mut attention: Vec<AttentionDto> = status
-            .attention
-            .iter()
-            .map(|a| match a {
-                Attention::SignInRequired => AttentionDto::SignInRequired,
-                Attention::UpgradeRequired => AttentionDto::UpgradeRequired,
-                Attention::QuotaFull => AttentionDto::QuotaFull,
-                Attention::UpdateTooLarge(_) => AttentionDto::UpdateTooLarge,
-                Attention::PushBlocked => AttentionDto::PushBlocked,
-            })
-            .collect();
-        if status.integrity_warnings > 0 {
-            attention.push(AttentionDto::IntegrityWarning);
-        }
-        Self {
-            state,
-            pending: status.pending,
-            attention,
-        }
-    }
-}
-
-impl SyncStatusDto {
-    /// Before the engine has said anything.
-    pub fn starting(pending: usize) -> Self {
-        Self {
-            state: SyncStateDto::Syncing,
-            pending,
-            attention: Vec::new(),
-        }
-    }
-}
-
 /// The `vault-changed` payload: ids only; the frontend re-queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VaultChangedDto {
@@ -232,7 +166,6 @@ pub struct SettingsDto {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notebook_core::sync::SyncState;
     use serde_json::json;
 
     #[test]
@@ -246,55 +179,5 @@ mod tests {
         );
         let bad: SelectionDto = serde_json::from_value(json!({"tag": "42"})).unwrap();
         assert_eq!(bad.parse().unwrap_err().code, Code::InvalidTagName);
-    }
-
-    #[test]
-    fn sync_status_payloads() {
-        let status = |state, pending, attention, integrity_warnings| SyncStatus {
-            state,
-            pending,
-            attention,
-            integrity_warnings,
-        };
-        assert_eq!(
-            serde_json::to_value(SyncStatusDto::from(&status(SyncState::Offline, 2, None, 0)))
-                .unwrap(),
-            json!({"state": "offline", "pending": 2, "attention": []})
-        );
-        assert_eq!(
-            serde_json::to_value(SyncStatusDto::from(&status(
-                SyncState::Synced,
-                0,
-                Some(Attention::UpgradeRequired),
-                0
-            )))
-            .unwrap(),
-            json!({"state": "synced", "pending": 0, "attention": ["upgrade_required"]})
-        );
-        assert_eq!(
-            serde_json::to_value(SyncStatusDto::from(&status(
-                SyncState::Syncing,
-                3,
-                Some(Attention::QuotaFull),
-                1
-            )))
-            .unwrap(),
-            json!({"state": "syncing", "pending": 3, "attention": ["quota_full", "integrity_warning"]})
-        );
-        let large = status(
-            SyncState::Syncing,
-            1,
-            Some(Attention::UpdateTooLarge(NoteId::from_parts(1, 1))),
-            0,
-        );
-        assert_eq!(
-            SyncStatusDto::from(&large).attention,
-            [AttentionDto::UpdateTooLarge]
-        );
-        let signed_out = status(SyncState::Offline, 1, Some(Attention::SignInRequired), 0);
-        assert_eq!(
-            SyncStatusDto::from(&signed_out).attention,
-            [AttentionDto::SignInRequired]
-        );
     }
 }

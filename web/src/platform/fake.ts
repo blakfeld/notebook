@@ -8,29 +8,30 @@ import type {
   ExportResult,
   ListEntry,
   Phase,
+  PhaseName,
   Selection,
   Settings,
   ThemePreference,
-  SyncStatus,
   TagNode,
 } from './types'
 
 /**
  * An in-memory {@link CoreApi} for tests and the browser dev page. It is a
  * stand-in, not a second core: tags are found with a rough pattern rather
- * than the core's grammar, titles are the first non-empty line, and nothing
- * is encrypted, stored, or synced.
+ * than the core's grammar, titles are the first non-empty line, recovery
+ * keys have no real checksum, and nothing is encrypted or stored.
  *
- * Tests drive it directly: seed notes, set `phase` and `syncState`, queue
- * failures with `failNext`, `emit` events, and read `calls`.
+ * It follows the host's phases: `setup` → `createNotebook` →
+ * `pending_recovery_key` → `acknowledgeRecoveryKey` → `open`, with
+ * `needs_recovery_key` (opened with `recoveryKey`) and the upgrade's
+ * `needs_old_passphrase` (opened with `oldPassphrase`, or `startOver`).
+ * Tests set `phase` to start anywhere.
+ *
+ * Tests drive it directly: seed notes, set `phase`, queue failures with
+ * `failNext`, `emit` events, and read `calls`.
  */
 export class FakeCoreApi implements CoreApi {
-  phase: Phase = {
-    phase: 'signed_out',
-    account: null,
-    credentials_remembered: true,
-  }
-  syncState: SyncStatus = { state: 'synced', pending: 0, attention: [] }
+  phase: Phase = { phase: 'setup', secure_store: true, upgrade: false }
   settings: Settings = {
     vim_mode: false,
     theme: 'system',
@@ -40,12 +41,17 @@ export class FakeCoreApi implements CoreApi {
   }
   /** Every call so far, by method name, with its arguments. */
   readonly calls: { method: string; args: unknown[] }[] = []
-  /** The account `signIn` accepts; any other credentials are refused. */
-  account = { username: 'alice', passphrase: 'correct horse battery' }
-  /** The recovery key `recover` accepts. */
-  recoveryKey = 'AAAA-BBBB-CCCC-DDDD'
-  /** While true, the server counts as unreachable. */
-  offline = false
+  /**
+   * The notebook's recovery key: what `createNotebook` and
+   * `pendingRecoveryKey` return and `openWithRecoveryKey` accepts.
+   */
+  recoveryKey = 'ABCD-EFGH-JKMN-PQRS-TVWX-YZ01-2345-6789'
+  /** The passphrase `upgradeWithPassphrase` accepts. */
+  oldPassphrase = 'correct horse battery'
+  /** What `coreVersion` returns. */
+  version = '0.1.0'
+  /** How many times `startOver` set the old notes aside. */
+  setAside = 0
   /** While true, `exportNotes` acts as if the folder picker was dismissed. */
   exportCancelled = false
   /** Where `exportNotes` says the export went. */
@@ -122,8 +128,9 @@ export class FakeCoreApi implements CoreApi {
   }
 
   /**
-   * Simulates a change from another device: edits the note, sends attached
-   * editors what they lack, and reports the change.
+   * Simulates a change the editor didn't make (another window, or the host
+   * itself): edits the note, sends attached editors what they lack, and
+   * reports the change.
    */
   remoteEdit(id: string, edit: (body: Y.Text) => void): void {
     const note = this.note(id)
@@ -141,7 +148,7 @@ export class FakeCoreApi implements CoreApi {
   }
 
   /**
-   * Simulates a permanent delete from another device: the note is gone,
+   * Simulates a permanent delete the editor didn't make: the note is gone,
    * attached editors get nothing more, and the change is reported.
    */
   remotePurge(id: string): void {
@@ -157,114 +164,71 @@ export class FakeCoreApi implements CoreApi {
 
   appState = () => this.call('appState', [], () => this.phase)
 
-  signIn = (server: string, username: string, passphrase: string) =>
-    this.call('signIn', [server, username, passphrase], () => {
-      this.reachable()
-      if (
-        username !== this.account.username ||
-        passphrase !== this.account.passphrase
-      ) {
-        throw fail('bad_credentials')
-      }
-      return this.setPhase('unlocked', { server, username })
+  coreVersion = () => this.call('coreVersion', [], () => this.version)
+
+  createNotebook = () =>
+    this.call('createNotebook', [], () => {
+      this.requirePhase('setup')
+      this.setPhase('pending_recovery_key')
+      return this.recoveryKey
     })
 
-  generateRecoveryKey = () =>
-    this.call('generateRecoveryKey', [], () => this.recoveryKey)
-
-  register = (args: Parameters<CoreApi['register']>[0]) =>
-    this.call('register', [args], () => {
-      if (args.passphrase !== args.confirm) throw fail('passphrase_mismatch')
-      this.reachable()
-      return this.setPhase('unlocked', {
-        server: args.server,
-        username: args.username,
-      })
+  pendingRecoveryKey = () =>
+    this.call('pendingRecoveryKey', [], () => {
+      this.requirePhase('pending_recovery_key')
+      return this.recoveryKey
     })
 
-  recover = (args: Parameters<CoreApi['recover']>[0]) =>
-    this.call('recover', [args], () => {
-      if (!/^[A-Z0-9]{4}(-[A-Z0-9]{4})+$/.test(args.recoveryKey)) {
-        throw fail('recovery_key_malformed')
-      }
-      if (args.passphrase !== args.confirm) throw fail('passphrase_mismatch')
-      this.reachable()
-      if (args.recoveryKey !== this.recoveryKey) {
+  acknowledgeRecoveryKey = () =>
+    this.call('acknowledgeRecoveryKey', [], () => {
+      this.requirePhase('pending_recovery_key')
+      return this.setPhase('open')
+    })
+
+  openWithRecoveryKey = (recoveryKey: string) =>
+    this.call('openWithRecoveryKey', [recoveryKey], () => {
+      // As on the host, the key's form is checked before the phase.
+      const typed = normalizeKey(recoveryKey)
+      if (typed === null) throw fail('recovery_key_malformed')
+      this.requirePhase('needs_recovery_key')
+      if (typed !== normalizeKey(this.recoveryKey)) {
         throw fail('recovery_key_wrong')
       }
-      this.account = { username: args.username, passphrase: args.passphrase }
-      return this.setPhase('unlocked', {
-        server: args.server,
-        username: args.username,
-      })
+      return this.setPhase('open')
     })
 
-  unlock = (passphrase: string) =>
-    this.call('unlock', [passphrase], () => {
-      if (passphrase !== this.account.passphrase) {
-        throw fail('wrong_passphrase')
-      }
-      return this.setPhase('unlocked', this.phase.account)
+  upgradeWithPassphrase = (passphrase: string) =>
+    this.call('upgradeWithPassphrase', [passphrase], () => {
+      this.requirePhase('needs_old_passphrase')
+      if (passphrase !== this.oldPassphrase) throw fail('wrong_passphrase')
+      return this.setPhase('pending_recovery_key', true)
     })
 
-  lock = () =>
-    this.call('lock', [], () => {
-      // Editor sessions go with the vault, as on the host.
-      this.sessions.clear()
-      return this.setPhase('locked', this.phase.account)
-    })
-
-  reauthenticate = (passphrase: string) =>
-    this.call('reauthenticate', [passphrase], () => {
-      this.reachable()
-      if (passphrase !== this.account.passphrase) {
-        throw fail('wrong_passphrase')
-      }
-      this.setSync({
-        ...this.syncState,
-        attention: this.syncState.attention.filter(
-          (a) => a !== 'sign_in_required',
-        ),
-      })
-    })
-
-  changePassphrase = (args: Parameters<CoreApi['changePassphrase']>[0]) =>
-    this.call('changePassphrase', [args], () => {
-      if (args.new !== args.confirm) throw fail('passphrase_mismatch')
-      if (this.offline) throw fail('offline')
-      if (args.current !== this.account.passphrase) {
-        throw fail('wrong_passphrase')
-      }
-      this.account = { ...this.account, passphrase: args.new }
-    })
-
-  signOut = (confirm: boolean) =>
-    this.call('signOut', [confirm], () => {
-      if (this.syncState.pending > 0 && !confirm) {
-        throw fail('pending_changes')
-      }
+  startOver = () =>
+    this.call('startOver', [], () => {
+      // As on the host: also while an upgrade's key is pending, since its
+      // database may only turn out unopenable at acknowledgment.
+      const { phase, upgrade } = this.phase
+      const allowed =
+        phase === 'needs_old_passphrase' ||
+        phase === 'needs_recovery_key' ||
+        (phase === 'pending_recovery_key' && upgrade)
+      if (!allowed) throw fail('not_open')
+      // The host renames the old database; the new notebook starts empty.
       this.notes.clear()
-      return this.setPhase('signed_out', null)
-    })
-
-  pendingCount = () =>
-    this.call('pendingCount', [], () => this.syncState.pending)
-
-  syncStatus = () =>
-    this.call('syncStatus', [], () => {
-      this.unlocked()
-      return this.syncState
+      this.setAside++
+      return this.setPhase('setup')
     })
 
   tagTree = () =>
     this.call('tagTree', [], () => {
-      this.unlocked()
+      this.requireOpen()
       return this.tree()
     })
 
   listNotes = (selection: Selection, query: string) =>
     this.call('listNotes', [selection, query], () => {
-      this.unlocked()
+      this.requireOpen()
       const terms = query.toLowerCase().split(/\s+/).filter(Boolean)
       return [...this.notes.entries()]
         .filter(([, note]) => inSelection(note, selection))
@@ -278,7 +242,7 @@ export class FakeCoreApi implements CoreApi {
 
   createNote = (selection: Selection) =>
     this.call('createNote', [selection], () => {
-      this.unlocked()
+      this.requireOpen()
       const id = this.seed({
         body: 'tag' in selection ? `#${selection.tag}\n` : '',
       })
@@ -297,15 +261,15 @@ export class FakeCoreApi implements CoreApi {
 
   deletePermanently = (id: string) =>
     this.call('deletePermanently', [id], () => {
+      this.requireOpen()
       if (!this.note(id).trashed) throw fail('not_trashed')
-      if (this.offline) throw fail('offline')
       this.notes.delete(id)
       this.changed([id])
     })
 
   renameTag = (old: string, renamed: string) =>
     this.call('renameTag', [old, renamed], () => {
-      this.unlocked()
+      this.requireOpen()
       const target = cleanPath(renamed)
       if (!target) throw fail('invalid_tag_name')
       const pattern = new RegExp(
@@ -332,7 +296,7 @@ export class FakeCoreApi implements CoreApi {
 
   exportNotes = (args: { includeTrashed: boolean }) =>
     this.call('exportNotes', [args], (): ExportResult | null => {
-      this.unlocked()
+      this.requireOpen()
       if (this.exportCancelled) return null
       const count = [...this.notes.values()].filter(
         (note) => args.includeTrashed || !note.trashed,
@@ -342,7 +306,7 @@ export class FakeCoreApi implements CoreApi {
 
   editorOpen = (noteId: string) =>
     this.call('editorOpen', [noteId], () => {
-      this.unlocked()
+      this.requireOpen()
       const note = this.note(noteId)
       const doc = new Y.Doc()
       Y.applyUpdate(doc, Y.encodeStateAsUpdate(note.doc))
@@ -353,7 +317,7 @@ export class FakeCoreApi implements CoreApi {
 
   editorPush = (session: number, update: string) =>
     this.call('editorPush', [session, update], () => {
-      this.unlocked()
+      this.requireOpen()
       const open = this.sessions.get(session)
       if (!open) throw fail('not_found')
       const note = this.note(open.note)
@@ -366,7 +330,7 @@ export class FakeCoreApi implements CoreApi {
 
   editorClose = (session: number) =>
     this.call('editorClose', [session], () => {
-      this.unlocked()
+      this.requireOpen()
       this.sessions.delete(session)
     })
 
@@ -442,17 +406,18 @@ export class FakeCoreApi implements CoreApi {
 
   // ---- helpers ----
 
-  /** Sets the phase and emits `app-phase-changed`. */
-  setPhase(phase: Phase['phase'], account: Phase['account']): Phase {
-    this.phase = { ...this.phase, phase, account }
+  /**
+   * Sets the phase and emits `app-phase-changed`. `upgrade` is always true
+   * in `needs_old_passphrase`, as on the host.
+   */
+  setPhase(phase: PhaseName, upgrade = false): Phase {
+    this.phase = {
+      ...this.phase,
+      phase,
+      upgrade: upgrade || phase === 'needs_old_passphrase',
+    }
     this.emit('app-phase-changed', this.phase)
     return this.phase
-  }
-
-  /** Sets the sync status and emits `sync-status`. */
-  setSync(status: SyncStatus): void {
-    this.syncState = status
-    this.emit('sync-status', status)
   }
 
   private async call<T>(
@@ -476,7 +441,7 @@ export class FakeCoreApi implements CoreApi {
   }
 
   private flag(id: string, flags: Partial<FakeNote>): void {
-    this.unlocked()
+    this.requireOpen()
     Object.assign(this.note(id), flags)
     this.changed([id])
   }
@@ -485,12 +450,13 @@ export class FakeCoreApi implements CoreApi {
     this.emit('vault-changed', { changed: ids, tree_changed: true })
   }
 
-  private unlocked(): void {
-    if (this.phase.phase !== 'unlocked') throw fail('locked')
+  private requireOpen(): void {
+    this.requirePhase('open')
   }
 
-  private reachable(): void {
-    if (this.offline) throw fail('unreachable')
+  /** Commands that don't fit the phase fail with `not_open`, as on the host. */
+  private requirePhase(phase: PhaseName): void {
+    if (this.phase.phase !== phase) throw fail('not_open')
   }
 
   private tick(): number {
@@ -556,6 +522,23 @@ function fail(code: ErrorCode): CoreError {
 
 const isTheme = (value: string): value is ThemePreference =>
   value === 'system' || value === 'light' || value === 'dark'
+
+const KEY_ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
+
+/**
+ * A recovery key as the host reads it (case, spaces, and hyphens ignored,
+ * `I`/`L` as `1` and `O` as `0`), or `null` if it isn't 32 characters of
+ * its alphabet. The host also checks a checksum; the fake has none.
+ */
+function normalizeKey(text: string): string | null {
+  const chars = [...text.toUpperCase().replace(/[\s-]/g, '')].map(
+    (c) => ({ I: '1', L: '1', O: '0' })[c] ?? c,
+  )
+  if (chars.length !== 32 || chars.some((c) => !KEY_ALPHABET.includes(c))) {
+    return null
+  }
+  return chars.join('')
+}
 
 function bodyOf(note: FakeNote): string {
   return note.doc.getText('body').toString()

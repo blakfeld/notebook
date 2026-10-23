@@ -5,13 +5,9 @@ import { fromBase64, toBase64 } from './base64'
 import { FakeCoreApi } from './fake'
 import { coreBridge } from './noteBridge'
 
-function unlockedCore(notes: { id: string; body: string }[]) {
+function openCore(notes: { id: string; body: string }[]) {
   const core = new FakeCoreApi(notes)
-  core.phase = {
-    phase: 'unlocked',
-    account: null,
-    credentials_remembered: true,
-  }
+  core.phase = { phase: 'open', secure_store: true, upgrade: false }
   return core
 }
 
@@ -25,7 +21,7 @@ describe('base64', () => {
 
 describe('coreBridge', () => {
   it('opens with the note’s state and pushes local edits', async () => {
-    const core = unlockedCore([{ id: 'a', body: 'hello' }])
+    const core = openCore([{ id: 'a', body: 'hello' }])
     const doc = await coreBridge(core).open('a')
 
     const ydoc = new Y.Doc()
@@ -45,7 +41,7 @@ describe('coreBridge', () => {
   })
 
   it('delivers remote updates for its own session only', async () => {
-    const core = unlockedCore([
+    const core = openCore([
       { id: 'a', body: 'a' },
       { id: 'b', body: 'b' },
     ])
@@ -68,7 +64,7 @@ describe('coreBridge', () => {
   })
 
   it('keeps updates that arrive before the editor subscribes', async () => {
-    const core = unlockedCore([{ id: 'a', body: 'a' }])
+    const core = openCore([{ id: 'a', body: 'a' }])
     const doc = await coreBridge(core).open('a')
     core.remoteEdit('a', (body) => body.insert(1, 'b'))
 
@@ -79,7 +75,7 @@ describe('coreBridge', () => {
   })
 
   it('attaches only once the update subscription is live', async () => {
-    const core = unlockedCore([{ id: 'a', body: 'a' }])
+    const core = openCore([{ id: 'a', body: 'a' }])
     core.holdSubscriptions = true
     const opening = coreBridge(core).open('a')
     await Promise.resolve()
@@ -98,21 +94,21 @@ describe('coreBridge', () => {
   })
 
   it('reports pushes the core will never take as NoteClosedError', async () => {
-    const core = unlockedCore([{ id: 'a', body: 'a' }])
+    const core = openCore([{ id: 'a', body: 'a' }])
     const doc = await coreBridge(core).open('a')
-    await core.lock()
+    await core.setTrashed('a', true)
     const push = doc.push(new Uint8Array([0, 0]))
     await expect(push).rejects.toBeInstanceOf(NoteClosedError)
     await expect(push).rejects.toMatchObject({
-      cause: { code: 'locked' },
+      cause: { code: 'trashed' },
     })
-    // Closing after a lock detaches without an error.
+    // Closing after that detaches without an error.
     await doc.close()
     expect(core.listenerCount('editor-remote-update')).toBe(0)
   })
 
   it('keeps other push failures retryable', async () => {
-    const core = unlockedCore([{ id: 'a', body: 'a' }])
+    const core = openCore([{ id: 'a', body: 'a' }])
     const doc = await coreBridge(core).open('a')
     core.failNext('editorPush', 'internal')
     const push = doc.push(new Uint8Array([0, 0]))
@@ -120,7 +116,7 @@ describe('coreBridge', () => {
   })
 
   it('rejects and unsubscribes when the note can’t be opened', async () => {
-    const core = unlockedCore([])
+    const core = openCore([])
     await expect(coreBridge(core).open('missing')).rejects.toMatchObject({
       code: 'not_found',
     })

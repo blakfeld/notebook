@@ -40,7 +40,8 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 ## Wave 1 (can start now)
 
-1. [ ] `local-only-desktop`: no logins; first launch creates a notebook, vault key in the keychain, recovery key shown once, upgrade path for server-backed installs, no network access
+1. [~] `local-only-desktop`: no logins; first launch creates a notebook, vault key in the keychain, recovery key shown once, upgrade path for server-backed installs, no network access
+   - In progress (branch `worktree-hashed-waddling-pelican`, uncommitted), 12 of 15 tasks done. All code is written, reviewed (code and security, findings fixed), and passes fmt, both clippy runs, all tests, and `openspec validate --strict`. Left, all manual and needing a person at the desktop: 3.7 (no CSP violations under `cargo tauri dev`), 5.1 (README flow works as written), 5.2 (end to end: fresh install, relaunch, no outbound connections in a network monitor, and upgrading a copy of a real signed-in data directory).
    - Needs: nothing outstanding. **Critical path**: wave 2 waits on it.
 2. [~] `vault-backup`, **core part** (tasks groups 1–3): backup file format, encryption, `import_note`, atomic writer, retention
    - In progress (branch `worktree-foamy-mapping-catmull`). `RecoveryEntry` is copied verbatim from the in-progress

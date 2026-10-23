@@ -1,4 +1,4 @@
-import { invoke, isTauri } from '@tauri-apps/api/core'
+import { isTauri } from '@tauri-apps/api/core'
 import type { CoreApi } from './core'
 import { tauriCore } from './tauri'
 
@@ -6,17 +6,6 @@ export type { CoreApi } from './core'
 export { coreBridge } from './noteBridge'
 export { coreSettings, type DeviceSettings } from './settings'
 export * from './types'
-
-/**
- * Returns the `notebook-core` version from the Tauri host, or `null` when
- * running as a plain browser build.
- */
-export async function coreVersion(): Promise<string | null> {
-  if (!isTauri()) {
-    return null
-  }
-  return invoke<string>('core_version')
-}
 
 /**
  * The core for this platform: the Tauri host when running in the shell.

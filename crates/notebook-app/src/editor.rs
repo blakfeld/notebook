@@ -1,7 +1,8 @@
 //! The host side of the note editor bridge (`web/src/editor/bridge.ts`):
 //! attach, push local updates, receive what the editor lacks, detach. Every
-//! edit goes through the workspace and replica, so it is stored and queued
-//! like any other, and edits to trashed notes are refused.
+//! edit goes through the workspace and replica, so it is stored
+//! like any other, and edits to trashed notes are refused. Changes made
+//! outside the editor (a tag rename) reach it as `editor-remote-update`.
 //!
 //! Updates cross IPC as base64 (Yjs v1 updates); sessions as small numbers
 //! that are never reused within a run.
@@ -17,7 +18,7 @@ use serde::Serialize;
 
 use crate::error::{AppError, AppResult, Code};
 use crate::events::{self, Emitter};
-use crate::state::{AppState, Unlocked, now};
+use crate::state::{AppState, OpenVault, now};
 
 #[derive(Default)]
 pub struct Editors {
@@ -44,7 +45,7 @@ fn decode(update: &str) -> AppResult<EditorUpdate> {
         .map_err(|_| AppError::internal("malformed editor update"))
 }
 
-fn session_of(u: &Unlocked, session: u64) -> AppResult<EditorSessionId> {
+fn session_of(u: &OpenVault, session: u64) -> AppResult<EditorSessionId> {
     u.editors
         .sessions
         .get(&session)
@@ -85,8 +86,8 @@ impl AppState {
 }
 
 /// Sends every editor attached to a changed note what it lacks, and forgets
-/// editors whose note was purged (the workspace already dropped them).
-pub(crate) fn forward_remote(emitter: &dyn Emitter, u: &mut Unlocked, changed: &Changed) {
+/// editors whose note was deleted (the workspace already dropped them).
+pub(crate) fn forward_changes(emitter: &dyn Emitter, u: &mut OpenVault, changed: &Changed) {
     let workspace = &u.workspace;
     u.editors
         .sessions
@@ -110,7 +111,7 @@ pub(crate) fn forward_remote(emitter: &dyn Emitter, u: &mut Unlocked, changed: &
                 },
             ),
             Ok(None) => {}
-            // The note was purged; its editor gets nothing more.
+            // The note was deleted; its editor gets nothing more.
             Err(_) => {
                 u.editors.sessions.remove(&session);
             }

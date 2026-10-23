@@ -1,7 +1,10 @@
 # Notebook
 
-An end-to-end encrypted notes app: a Rust core shared by a sync server, Tauri
-desktop/mobile apps, and a browser client.
+An encrypted, local-only notes app for the desktop: a Rust core and a Tauri
+app around a Svelte frontend. There are no accounts, logins, or servers, and
+the app makes no network requests. Notes are encrypted on disk with a vault
+key kept in the OS keychain. A recovery key, shown once when the notebook is
+created, opens the notebook when the keychain doesn't have it.
 
 ## Layout
 
@@ -10,12 +13,12 @@ Cargo.toml              Cargo workspace (shared deps and lints)
 rust-toolchain.toml     pinned Rust toolchain, incl. wasm32-unknown-unknown
 crates/
   notebook-core/        platform-independent library (native + wasm32)
-  notebook-server/      axum sync server binary
-  notebook-app/         Tauri 2 app (desktop window around web/)
+  notebook-storage-sqlite/  the local SQLite store
+  notebook-app/         Tauri 2 desktop app around web/
+  notebook-server/      the old sync server, no longer used (removal planned)
 web/                    Svelte 5 + Vite + TypeScript frontend
   src/lib/              components and helpers
-  src/platform/         host adapter (Tauri IPC today)
-docs/deployment.md      running the server in production
+  src/platform/         host adapter (Tauri IPC)
 scripts/check.sh        every CI check, run locally
 openspec/               specs and planned changes (see TODO.md)
 ```
@@ -44,37 +47,35 @@ cd web && npm ci
 
 ## Running
 
-Web dev server (plain browser build, shows "browser build"), at
-<http://localhost:5173>:
-
-```sh
-cd web && npm run dev
-```
-
-Tauri app in dev mode (starts the web dev server itself, shows the core
-version):
+The desktop app in dev mode. It starts the web dev server itself:
 
 ```sh
 cd crates/notebook-app && cargo tauri dev
 ```
 
-Server, against a local database at `notebook.db` (`--help` lists the
-subcommands):
+On first launch it offers to create a notebook, shows the recovery key once,
+and opens after you confirm you saved it. Later launches open straight into
+the notes. Without an OS secure store (for example, Linux with no Secret
+Service), the app asks for the recovery key at each launch instead of storing
+the vault key in a file.
+
+The frontend alone, in a plain browser at <http://localhost:5173>, runs on an
+in-memory demo with sample notes (dev builds only):
 
 ```sh
-NOTEBOOK_PUBLIC_URL=http://localhost:8080 cargo run -p notebook-server -- serve
+cd web && npm run dev
 ```
 
-It creates `opaque-server.key` (the OPAQUE key file) next to the database on
-first start. HTTP registration is closed, so create an account from the
-command line; it prints the account's recovery key once:
+### Upgrading from the server-backed version
 
-```sh
-NOTEBOOK_PUBLIC_URL=http://localhost:8080 cargo run -p notebook-server -- user add alice
-```
-
-See [docs/deployment.md](docs/deployment.md) for configuration, the reverse
-proxy, backups, and upgrades.
+Earlier versions signed in to a sync server. Before upgrading a device, let
+it finish syncing (the indicator shows "Synced") so every note is on the
+device. On first launch, the new version converts the device's notebook in
+place. It uses the stored vault key, or asks once for the old passphrase if
+the app was locked. It then shows a new recovery key. Save it: the old
+recovery key no longer opens anything. If the old passphrase is lost, "Start
+over" keeps the old database beside the new one (`vault.sqlite3.legacy-*` in
+the app's data directory) and creates an empty notebook.
 
 `notebook-app` embeds `web/dist` at compile time, so build the frontend before
 any `cargo build`, `clippy`, or `test` that includes it:

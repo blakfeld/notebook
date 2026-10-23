@@ -1,14 +1,11 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte'
   import { coreBridge, type CoreApi } from '../../platform'
-  import ReauthPrompt from '../account/ReauthPrompt.svelte'
-  import SecureStoreNotice from '../account/SecureStoreNotice.svelte'
   import { errorMessage } from '../errors'
   import type { PreferencesStore } from '../preferences'
   import { displayTitle, shortcutOf } from '../format'
   import {
     createVault,
-    lockVault,
     setVault,
     startVault,
     stopVault,
@@ -29,8 +26,8 @@
 
   let { core, phase, preferences }: Props = $props()
 
-  // One vault per unlock: the shell is unmounted on lock, which drops it.
-  // The core, phase, and preferences never change while it's mounted.
+  // One vault while the notebook is open. The core, phase, and preferences
+  // never change while the shell is mounted.
   const vault = untrack(() => createVault(core, phase, preferences))
   setVault(vault)
   const actions = new NoteActions(vault)
@@ -38,20 +35,11 @@
 
   let settingsOpen = $state(false)
   let noteList = $state<ReturnType<typeof NoteList>>()
-  let shellError = $state('')
 
   onMount(() => {
     void startVault(vault)
     return () => stopVault(vault)
   })
-
-  async function lock() {
-    try {
-      await lockVault(vault)
-    } catch (error) {
-      shellError = errorMessage(error)
-    }
-  }
 
   function onkeydown(event: KeyboardEvent) {
     // Dialogs keep the keyboard to themselves.
@@ -60,15 +48,13 @@
     if (!shortcut) return
     event.preventDefault()
     if (shortcut === 'new-note') void actions.newNote()
-    else if (shortcut === 'search') noteList?.focusSearch()
-    else void lock()
+    else noteList?.focusSearch()
   }
 
   const preferenceError = untrack(() => preferences.saveError)
 
   let message = $derived(
     actions.error ||
-      shellError ||
       ($preferenceError
         ? `Couldn’t save that setting: ${errorMessage($preferenceError)}`
         : ''),
@@ -78,10 +64,6 @@
 <svelte:window {onkeydown} />
 
 <div class="shell">
-  <SecureStoreNotice
-    remembered={phase.current?.credentials_remembered ?? true}
-  />
-  <ReauthPrompt {core} sync={vault.sync} />
   {#if message}
     <div class="message" role="alert">
       <span>{message}</span>
@@ -91,7 +73,6 @@
         aria-label="Dismiss"
         onclick={() => {
           actions.error = ''
-          shellError = ''
           preferences.clearSaveError()
         }}
       >
@@ -115,7 +96,7 @@
     title="Delete permanently?"
     message="“{displayTitle(
       actions.confirming.title,
-    )}” will be deleted from all your devices. This can’t be undone."
+    )}” will be deleted from this device. This can’t be undone."
     confirmLabel="Delete permanently"
     onConfirm={() => actions.confirmDelete()}
     onCancel={() => actions.cancelDelete()}

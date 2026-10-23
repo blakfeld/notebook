@@ -1,4 +1,4 @@
-import { errorCode, type ListEntry } from '../../platform'
+import type { ListEntry } from '../../platform'
 import { errorMessage } from '../errors'
 import { flushEditor, type Vault } from '../state'
 
@@ -121,12 +121,7 @@ export class NoteActions {
       if (selection.noteId === entry.id) selection.openNote(null)
       await notes.refreshList()
     } catch (error) {
-      if (errorCode(error) === 'offline') {
-        this.error =
-          'Deleting permanently needs a connection to the server. The note stays in Trash.'
-      } else {
-        this.#fail(error)
-      }
+      this.#fail(error)
     }
   }
 
@@ -136,6 +131,5 @@ export class NoteActions {
 
   #fail(error: unknown): void {
     this.error = errorMessage(error)
-    this.#vault.sync.checkError(error)
   }
 }

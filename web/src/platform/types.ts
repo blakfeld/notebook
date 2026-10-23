@@ -6,22 +6,30 @@
  * Unix milliseconds.
  */
 
-export type PhaseName = 'signed_out' | 'locked' | 'unlocked'
-
-export interface Account {
-  server: string
-  username: string
-}
+export type PhaseName =
+  /** No notebook on this device: the welcome screen. */
+  | 'setup'
+  /** A recovery key was generated and is waiting to be acknowledged. */
+  | 'pending_recovery_key'
+  /** A notebook exists but its key isn't in the secure store. */
+  | 'needs_recovery_key'
+  /** Upgrading a locked server-backed install: the old passphrase opens it. */
+  | 'needs_old_passphrase'
+  | 'open'
 
 /** The `app_state` result and the `app-phase-changed` payload. */
 export interface Phase {
   phase: PhaseName
-  account: Account | null
   /**
-   * False when there is no OS secure store, so the user will have to sign
-   * in again next launch.
+   * False when the OS has no usable secure store, so the vault key isn't
+   * remembered and the recovery key is asked for at each launch.
    */
-  credentials_remembered: boolean
+  secure_store: boolean
+  /**
+   * True while converting a server-backed install, so the screens can say
+   * that the old recovery key no longer matters.
+   */
+  upgrade: boolean
 }
 
 export type View = 'notes' | 'untagged' | 'pinned' | 'archive' | 'trash'
@@ -46,24 +54,6 @@ export interface ListEntry {
   pinned: boolean
   archived: boolean
   trashed: boolean
-}
-
-export type SyncState = 'synced' | 'syncing' | 'offline'
-
-export type Attention =
-  | 'sign_in_required'
-  | 'upgrade_required'
-  | 'quota_full'
-  | 'update_too_large'
-  | 'push_blocked'
-  | 'integrity_warning'
-
-/** The `sync_status` result and the `sync-status` payload. */
-export interface SyncStatus {
-  state: SyncState
-  /** Local changes the server hasn't acknowledged. */
-  pending: number
-  attention: Attention[]
 }
 
 /** The `vault-changed` payload: ids only, so the frontend re-queries. */
@@ -108,33 +98,19 @@ export interface EditorRemoteUpdate {
 /** Every event the core emits, by name. */
 export interface CoreEvents {
   'app-phase-changed': Phase
-  'sync-status': SyncStatus
   'vault-changed': VaultChanged
   'editor-remote-update': EditorRemoteUpdate
 }
 
 /** The stable error codes (`Code` in `error.rs`). */
 export type ErrorCode =
-  | 'invalid_server_url'
-  | 'invalid_username'
-  | 'passphrase_too_short'
-  | 'passphrase_mismatch'
-  | 'bad_credentials'
-  | 'sign_in_required'
-  | 'unreachable'
-  | 'rate_limited'
-  | 'invalid_invite'
-  | 'username_taken'
-  | 'recovery_key_required'
   | 'recovery_key_malformed'
   | 'recovery_key_wrong'
   | 'wrong_passphrase'
-  | 'offline'
-  | 'pending_changes'
   | 'invalid_tag_name'
   | 'trashed'
   | 'not_trashed'
-  | 'locked'
+  | 'not_open'
   | 'not_found'
   | 'export_failed'
   | 'internal'
