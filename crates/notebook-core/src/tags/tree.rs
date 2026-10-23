@@ -47,10 +47,20 @@ struct Builder {
 impl TagTree {
     /// Builds the tree for `notes`.
     pub fn build(notes: &[Note]) -> Self {
+        Self::build_with(notes, |note| tags_of(note.body()))
+    }
+
+    /// Like [`build`](Self::build), but takes each note's tags from `tags`,
+    /// which must return what [`tags_of`] would for its body. Parsing every
+    /// body is the slow part, so callers that keep the tags can skip it.
+    pub fn build_with<T: AsRef<[TagPath]>>(
+        notes: &[Note],
+        mut tags: impl FnMut(&Note) -> T,
+    ) -> Self {
         let mut root = Builder::default();
         for note in notes.iter().filter(|n| !n.is_archived() && !n.is_trashed()) {
             let order = note_order(note);
-            for tag in tags_of(note.body()) {
+            for tag in tags(note).as_ref() {
                 let mut node = &mut root;
                 for (segment, key) in tag.segments().iter().zip(tag.key()) {
                     node = node.children.entry(key.clone()).or_default();
