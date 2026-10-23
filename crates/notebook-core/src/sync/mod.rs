@@ -70,6 +70,9 @@ pub use engine::SyncEngine;
 pub use replica::{EditorSessionId, Replica, ReplicaError};
 pub use session::{AccessToken, RefreshError, SessionSource};
 pub use timer::Timer;
+pub(crate) use transport::is_loopback;
+#[cfg(any(feature = "transport-native", feature = "transport-wasm"))]
+pub(crate) use transport::parse_retry_after;
 pub use transport::{LiveChannel, LiveEvent, Transport, TransportError};
 
 use crate::note::NoteId;

@@ -221,7 +221,7 @@ pub(crate) fn urls(server: &str) -> Result<(String, String), TransportError> {
 }
 
 /// Whether `authority` (`host[:port]`) names this machine.
-fn is_loopback(authority: &str) -> bool {
+pub(crate) fn is_loopback(authority: &str) -> bool {
     let host = match authority.strip_prefix('[') {
         Some(v6) => v6.split(']').next().unwrap_or_default(),
         None => authority.split(':').next().unwrap_or_default(),

@@ -9,9 +9,11 @@ pub mod crypto;
 pub mod document;
 pub mod note;
 pub mod protocol;
+pub mod search;
 pub mod storage;
 pub mod sync;
 pub mod tags;
+pub mod workspace;
 
 /// Returns the version of `notebook-core`.
 pub fn version() -> &'static str {

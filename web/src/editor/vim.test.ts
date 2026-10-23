@@ -48,6 +48,26 @@ describe('vim mode', () => {
     expect(body(view)).toBe('keep me\nkeep me too')
   })
 
+  it('destroying the editor forgets yanked text and searches', async () => {
+    const { editor, view } = setup({ a: 'SECRET line one\nsecond SECRET2' })
+    await editor.openNote('a')
+    editor.setVimMode(true)
+    select(view, 0)
+    keys(view, 'y', 'y', '/', 'S', 'E', 'C', '<CR>')
+    const vimState = () => Vim.getVimGlobalState_()
+    expect(vimState().registerController.unnamedRegister.toString()).toContain(
+      'SECRET',
+    )
+    await editor.destroy()
+    expect(
+      vimState().registerController.unnamedRegister.toString(),
+    ).not.toContain('SECRET')
+    expect(JSON.stringify(vimState().searchHistoryController)).not.toContain(
+      'SEC',
+    )
+    expect(view.state.doc.toString()).toBe('')
+  })
+
   it('toggle while editing', async () => {
     const { editor, view } = setup({ a: 'hello' })
     await editor.openNote('a')

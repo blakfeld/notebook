@@ -94,6 +94,33 @@ impl VaultKey {
         let bytes = envelope::open(self.0.as_bytes(), &wrap_context(vault, note), wrapped)?;
         SymmetricKey::from_slice(&bytes).map(NoteKey)
     }
+
+    /// Encrypts a device-local setting that would reveal vault content (such
+    /// as tag names), so it can sit in the unencrypted settings table.
+    pub fn seal_setting(&self, vault: VaultId, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        envelope::seal(self.0.as_bytes(), &setting_context(vault), plaintext)
+    }
+
+    /// Decrypts a value from [`seal_setting`](Self::seal_setting).
+    pub fn open_setting(
+        &self,
+        vault: VaultId,
+        sealed: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        envelope::open(self.0.as_bytes(), &setting_context(vault), sealed)
+    }
+
+    /// The raw key, for a host that keeps it in the OS credential store
+    /// while the app is unlocked. Never store it anywhere else.
+    pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
+        Zeroizing::new(*self.0.as_bytes())
+    }
+
+    /// Rebuilds a key from [`to_secret_bytes`](Self::to_secret_bytes).
+    /// Anything but 32 bytes is [`CryptoError::Malformed`].
+    pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
+        SymmetricKey::from_slice(bytes).map(Self)
+    }
 }
 
 impl fmt::Debug for VaultKey {
@@ -157,6 +184,17 @@ fn data_context(vault: VaultId, note: NoteId, kind: PayloadKind) -> Context {
         vault,
         kind: kind.to_u8(),
         note: Some(note),
+    }
+}
+
+/// Envelope kind for a device-local setting sealed by the vault key.
+const KIND_SEALED_SETTING: u8 = 17;
+
+fn setting_context(vault: VaultId) -> Context {
+    Context {
+        vault,
+        kind: KIND_SEALED_SETTING,
+        note: None,
     }
 }
 

@@ -186,18 +186,33 @@ impl Note {
     }
 }
 
-fn derive_title(body: &str) -> &str {
+/// The text after the line the title comes from (empty when there is no
+/// title line), for list previews.
+pub(crate) fn after_title(body: &str) -> &str {
+    title_line(body).map_or("", |(_, _, rest)| rest)
+}
+
+/// The trimmed line the title comes from, whether it can hold a block
+/// marker, and the rest of the body after it.
+fn title_line(body: &str) -> Option<(&str, bool, &str)> {
     let is_fence = |line: &str| line.starts_with("```") || line.starts_with("~~~");
-    let Some((line, can_be_marker)) = body
-        .lines()
-        .map(|raw| {
-            // Up to three spaces of indentation still allow a block marker.
-            let unindented = raw.trim_start_matches(' ');
-            let can_be_marker = raw.len() - unindented.len() < 4 && !unindented.starts_with('\t');
-            (raw.trim(), can_be_marker)
-        })
-        .find(|&(line, can_be_marker)| !line.is_empty() && !(can_be_marker && is_fence(line)))
-    else {
+    let mut end = 0;
+    for raw in body.split_inclusive('\n') {
+        end += raw.len();
+        let raw = raw.trim_end_matches(['\n', '\r']);
+        // Up to three spaces of indentation still allow a block marker.
+        let unindented = raw.trim_start_matches(' ');
+        let can_be_marker = raw.len() - unindented.len() < 4 && !unindented.starts_with('\t');
+        let line = raw.trim();
+        if !line.is_empty() && !(can_be_marker && is_fence(line)) {
+            return Some((line, can_be_marker, &body[end..]));
+        }
+    }
+    None
+}
+
+fn derive_title(body: &str) -> &str {
+    let Some((line, can_be_marker, _)) = title_line(body) else {
         return "";
     };
     if !can_be_marker {

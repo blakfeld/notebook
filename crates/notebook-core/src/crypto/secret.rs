@@ -14,6 +14,7 @@ pub const MIN_AUTH_SECRET_LEN: usize = 32;
 
 const INFO_AUTH: &[u8] = b"notebook/v1/kek/auth";
 const INFO_RECOVERY: &[u8] = b"notebook/v1/kek/recovery";
+const INFO_LOCAL: &[u8] = b"notebook/v1/kek/local";
 
 /// A high-entropy secret from the auth layer that unlocks the key bundle:
 /// the OPAQUE export key, or the output of
@@ -33,6 +34,12 @@ impl AuthSecret {
 
     pub(crate) fn wrapping_key(&self, vault: VaultId) -> SymmetricKey {
         derive_wrapping_key(&self.0, vault, INFO_AUTH)
+    }
+
+    /// The key for a device-local passphrase wrap
+    /// ([`LocalUnlock`](super::LocalUnlock)), distinct from the bundle's.
+    pub(crate) fn local_wrapping_key(&self, vault: VaultId) -> SymmetricKey {
+        derive_wrapping_key(&self.0, vault, INFO_LOCAL)
     }
 }
 

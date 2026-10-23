@@ -1,10 +1,10 @@
-# Spec Delta
+# app-shell Specification
 
 ## Purpose
 
 Defines the Notebook client application experience shared by desktop, browser, and mobile: account and unlock flows, the sidebar tag tree and special views, the note list, note and tag operations, local search, sync status, and settings.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Server address
 Sign-in, registration, and recovery SHALL take the server's address from the user. The app SHALL accept only `https` addresses, except `http` addresses whose host is a loopback address or `localhost`. Any other address SHALL be rejected before contacting a server, with a message naming the problem.
@@ -284,7 +284,7 @@ A trashed note SHALL open read-only in the editor, with an action to restore it.
 - **THEN** the body does not change
 
 ### Requirement: Delete permanently
-The user SHALL be able to permanently delete a note only from Trash, after confirming. The note SHALL disappear from every view on this device and, once synced, from the user's other devices and the server.
+The user SHALL be able to permanently delete a note only from Trash, after confirming. Permanent deletion SHALL require a server connection: the note SHALL be deleted on the server first, then disappear from every view on this device, and from the user's other devices once they sync. When the server cannot be reached, the app SHALL say a connection is required and the note SHALL stay in Trash.
 
 #### Scenario: Permanent delete
 - **WHEN** the user permanently deletes a trashed note and confirms
@@ -293,6 +293,10 @@ The user SHALL be able to permanently delete a note only from Trash, after confi
 #### Scenario: Cancelled delete
 - **WHEN** the user cancels the confirmation
 - **THEN** the note stays in Trash
+
+#### Scenario: Delete while offline
+- **WHEN** the user permanently deletes a trashed note while the server is unreachable
+- **THEN** the app says a connection is required and the note stays in Trash
 
 ### Requirement: Rename and move a tag
 The user SHALL be able to rename a tag from the sidebar, entering a full tag path so a rename can also move it under another parent. Every note carrying the tag or its descendants, including archived and trashed notes, SHALL be rewritten, and the changes SHALL sync like any edit.
@@ -355,7 +359,7 @@ The app SHALL always show the sync state (synced, syncing, or offline), the numb
 - **THEN** the indicator says storage is full, the refused changes stay pending and are counted, and remote changes still arrive
 
 ### Requirement: Offline editing is durable
-Every note operation SHALL work offline. Changes made offline SHALL survive quitting and relaunching the app and SHALL sync when the server becomes reachable again.
+Every note operation except permanent deletion SHALL work offline. Changes made offline SHALL survive quitting and relaunching the app and SHALL sync when the server becomes reachable again.
 
 #### Scenario: Offline edit survives restart
 - **WHEN** the user edits a note offline, quits, relaunches, and later goes online

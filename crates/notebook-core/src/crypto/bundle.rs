@@ -118,6 +118,13 @@ impl KeyBundle {
         a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
     }
 
+    /// SHA-256 of [`to_bytes`](Self::to_bytes). A device compares it with
+    /// the server's current bundle to notice a passphrase changed elsewhere.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(self.to_bytes()).into()
+    }
+
     /// Serializes the bundle for storage.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut out =
@@ -433,6 +440,17 @@ mod tests {
         for kind in [KIND_VAULT_KEY_AUTH, KIND_VAULT_KEY_RECOVERY] {
             assert!(![1, 2, 3, crate::crypto::keys::KIND_WRAPPED_NOTE_KEY].contains(&kind));
         }
+    }
+
+    #[test]
+    fn fingerprint_changes_with_the_auth_entry() {
+        let mut f = fixture();
+        let before = f.bundle.fingerprint();
+        let parsed = KeyBundle::from_bytes(&f.bundle.to_bytes()).unwrap();
+        assert_eq!(parsed.fingerprint(), before);
+        let new_auth = AuthSecret::from_bytes(&[4; 64]).unwrap();
+        f.bundle.change_auth(&f.auth, &new_auth).unwrap();
+        assert_ne!(f.bundle.fingerprint(), before);
     }
 
     #[test]

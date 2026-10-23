@@ -48,7 +48,8 @@ export interface OpenNoteDoc {
   /**
    * Delivers local edits (a Yjs v1 update) to the core. Resolves once the
    * core has stored them. Rejects if it couldn't; the editor keeps the
-   * update and sends it again.
+   * update and sends it again, unless the rejection is a
+   * {@link NoteClosedError}.
    */
   push(update: Uint8Array): Promise<void>
   /**
@@ -59,4 +60,17 @@ export interface OpenNoteDoc {
   onRemote(cb: (update: Uint8Array) => void): () => void
   /** Detaches the editor. Call it after the last push. */
   close(): Promise<void>
+}
+
+/**
+ * A push the core will never accept: the note was deleted or trashed, or
+ * the vault locked. The editor drops the update instead of retrying, and
+ * detaches.
+ */
+export class NoteClosedError extends Error {
+  /** `cause` is what the core reported, for the host to show. */
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause })
+    this.name = 'NoteClosedError'
+  }
 }

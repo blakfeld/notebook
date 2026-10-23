@@ -7,6 +7,7 @@ import {
   setSearchQuery,
 } from '@codemirror/search'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { NoteClosedError } from './bridge'
 import { body, cursorAtEnd, press, select, setup, type } from './testing'
 
 afterEach(() => {
@@ -272,6 +273,30 @@ describe('delivery', () => {
     bridge.failPushes = false
     await vi.advanceTimersByTimeAsync(300)
     expect(bridge.body('a')).toBe('one two')
+  })
+
+  it('a push the core will never take is dropped and the note detached', async () => {
+    vi.useFakeTimers()
+    const { editor, view, bridge, errors } = setup({ a: '' })
+    await editor.openNote('a')
+    bridge.pushError = new NoteClosedError('locked')
+    type(view, 'one')
+    await vi.advanceTimersByTimeAsync(300)
+    expect(errors).toEqual([bridge.pushError])
+    expect(bridge.attached('a')).toBe(0)
+
+    // No retries, and later typing goes nowhere.
+    bridge.pushError = null
+    type(view, ' two')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(errors).toHaveLength(1)
+    expect(bridge.pushes).toBe(0)
+
+    // Closing or switching afterwards doesn't try again either.
+    await editor.openNote(null)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(bridge.pushes).toBe(0)
+    expect(errors).toHaveLength(1)
   })
 
   it('a failed delivery is retried without more typing', async () => {

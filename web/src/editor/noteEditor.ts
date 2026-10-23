@@ -13,7 +13,7 @@ import { Vim, vim } from '@replit/codemirror-vim'
 import { yCollab, ySyncAnnotation } from 'y-codemirror.next'
 import * as Y from 'yjs'
 import type { DeviceSettings } from '../platform/settings'
-import type { NoteDocBridge, OpenNoteDoc } from './bridge'
+import { NoteClosedError, type NoteDocBridge, type OpenNoteDoc } from './bridge'
 import { tagHighlighter, tagTheme } from './tags'
 
 /** The device setting that turns vim mode on (`"true"`) or off. */
@@ -125,9 +125,16 @@ class Session {
     const inFlight = this.doc.push(update).then(
       () => true,
       (error: unknown) => {
+        this.onError(error)
+        if (error instanceof NoteClosedError) {
+          // The core will never take it: drop it and everything after it,
+          // and detach, so nothing keeps the note's content alive.
+          this.pending = []
+          void this.close()
+          return false
+        }
         // Kept at the head, so it merges with anything typed since.
         this.pending.unshift(update)
-        this.onError(error)
         if (!this.retiring) {
           this.maxTimer ??= setTimeout(() => void this.flush(), RETRY_DELAY_MS)
         }
@@ -157,19 +164,21 @@ class Session {
    */
   async retire(): Promise<void> {
     this.retiring = true
-    if (await this.flushAll()) {
+    if ((await this.flushAll()) || this.closed) {
       await this.close()
       return
     }
     void (async () => {
       do {
         await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS))
-      } while (!(await this.flushAll()))
+      } while (!this.closed && !(await this.flushAll()))
       await this.close()
     })()
   }
 
+  /** Detaches once; later calls do nothing. */
   private async close() {
+    if (this.closed) return
     this.closed = true
     clearTimeout(this.idleTimer)
     clearTimeout(this.maxTimer)
@@ -399,7 +408,13 @@ export function createNoteEditor(
       const previous = session
       session = null
       editors.delete(view)
+      // Leave no note text behind for whatever still references the view
+      // (vim's jump list does), and clear vim's module-level registers and
+      // histories, which outlive every editor: after a lock or a sign-out
+      // they would otherwise hold, and paste, the previous note's text.
+      view.setState(stateFor(null))
       view.destroy()
+      Vim.resetVimGlobalState_()
       host.remove()
       await previous?.retire()
     },

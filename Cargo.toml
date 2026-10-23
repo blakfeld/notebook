@@ -24,6 +24,8 @@ opt-level = 3
 
 [workspace.dependencies]
 notebook-core = { path = "crates/notebook-core" }
+notebook-server = { path = "crates/notebook-server" }
+notebook-storage-sqlite = { path = "crates/notebook-storage-sqlite" }
 
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
 axum = "0.8.9"
@@ -40,6 +42,9 @@ gloo-timers = { version = "0.4.0", features = ["futures"] }
 governor = "0.10.4"
 hkdf = "0.13.0"
 js-sys = "0.3.106"
+# OS credential stores. The default `v1` feature is macOS Keychain, Windows
+# Credential Manager, and the pure-Rust Secret Service client on Linux.
+keyring = "4.2.0"
 http-body-util = "0.1.5"
 # Pinned exactly: a version bump can change stored OPAQUE records and the wire
 # format (see the recorded-transcript test in notebook-core's auth module).

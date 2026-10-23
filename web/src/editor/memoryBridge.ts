@@ -13,6 +13,8 @@ export interface MemoryBridge extends NoteDocBridge {
   remoteEdit(noteId: string, edit: (body: Y.Text) => void): void
   /** While true, every push rejects. */
   failPushes: boolean
+  /** While set, every push rejects with this error. */
+  pushError: Error | null
   /** Pushes accepted so far, across all notes. */
   readonly pushes: number
   /** Editors currently attached to the note. */
@@ -45,6 +47,7 @@ export function memoryBridge(notes: Record<string, string> = {}): MemoryBridge {
 
   const bridge: MemoryBridge = {
     failPushes: false,
+    pushError: null,
     get pushes() {
       return pushes
     },
@@ -67,6 +70,7 @@ export function memoryBridge(notes: Record<string, string> = {}): MemoryBridge {
         initialState: Y.encodeStateAsUpdate(doc),
         async push(update) {
           if (!open) throw new Error('editor detached')
+          if (bridge.pushError) throw bridge.pushError
           if (bridge.failPushes) throw new Error('push failed')
           Y.applyUpdate(doc, update, self)
           pushes++

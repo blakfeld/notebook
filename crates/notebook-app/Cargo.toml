@@ -15,12 +15,27 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build.workspace = true
 
 [dependencies]
-notebook-core.workspace = true
+base64.workspace = true
+futures.workspace = true
+getrandom.workspace = true
+keyring.workspace = true
+notebook-core = { workspace = true, features = ["transport-native"] }
+notebook-storage-sqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tauri.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+ulid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+notebook-core = { workspace = true, features = ["transport-native", "test-util"] }
+notebook-server.workspace = true
+sqlx.workspace = true
 tauri = { workspace = true, features = ["test"] }
+tempfile.workspace = true
+yrs.workspace = true
 
 [lints]
 workspace = true

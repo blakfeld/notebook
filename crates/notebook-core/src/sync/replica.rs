@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use futures::channel::mpsc;
+use zeroize::Zeroizing;
 
 use crate::crypto::{CryptoError, NoteKey, VaultId, VaultKey, fill_random};
 use crate::document::{
@@ -299,6 +300,34 @@ impl<S: Storage> Replica<S> {
     /// Detaches `session`'s editor. Unknown sessions are ignored.
     pub fn editor_detach(&mut self, session: EditorSessionId) {
         self.editors.remove(&session);
+    }
+
+    /// Writes the device-local setting `key` (see
+    /// [`Storage::set_setting`]). Settings are stored unencrypted.
+    pub fn set_setting(&mut self, key: &str, value: &str) -> Result<(), StorageError> {
+        self.store_mut()?.set_setting(key, value)
+    }
+
+    /// A setting written by [`set_sealed_setting`](Self::set_sealed_setting).
+    /// One that doesn't decrypt (another vault's, or damaged) reads as unset.
+    pub fn sealed_setting(&self, key: &str) -> Result<Option<Zeroizing<Vec<u8>>>, StorageError> {
+        use base64::Engine;
+        let Some(stored) = self.store()?.setting(key)? else {
+            return Ok(None);
+        };
+        Ok(base64::engine::general_purpose::STANDARD
+            .decode(stored)
+            .ok()
+            .and_then(|sealed| self.vault_key.open_setting(self.vault, &sealed).ok()))
+    }
+
+    /// Writes a device-local setting encrypted under the vault key, for
+    /// values that would reveal vault content, such as tag names.
+    pub fn set_sealed_setting(&mut self, key: &str, value: &[u8]) -> Result<(), ReplicaError> {
+        use base64::Engine;
+        let sealed = self.vault_key.seal_setting(self.vault, value)?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(sealed);
+        Ok(self.store_mut()?.set_setting(key, &encoded)?)
     }
 
     /// The number of local updates not yet acknowledged by the server.
@@ -748,6 +777,70 @@ mod tests {
     fn reopen(r: &Replica<MemoryStorage>) -> Replica<MemoryStorage> {
         let [key] = vault_keys(vault());
         Replica::open(r.storage().unwrap().clone(), key).unwrap()
+    }
+
+    #[test]
+    fn settings_write_through_to_storage() {
+        let (mut a, _) = pair();
+        assert_eq!(
+            a.storage().unwrap().setting("editor.vimMode").unwrap(),
+            None
+        );
+        a.set_setting("editor.vimMode", "true").unwrap();
+        a.set_setting("editor.vimMode", "false").unwrap();
+        assert_eq!(
+            a.storage().unwrap().setting("editor.vimMode").unwrap(),
+            Some("false".into())
+        );
+        let reopened = reopen(&a);
+        assert_eq!(
+            reopened
+                .storage()
+                .unwrap()
+                .setting("editor.vimMode")
+                .unwrap(),
+            Some("false".into())
+        );
+        // Settings aren't note data: nothing is queued for the server.
+        assert_eq!(reopened.pending().unwrap(), 0);
+    }
+
+    #[test]
+    fn sealed_settings_are_encrypted_at_rest() {
+        let (mut a, mut b) = pair();
+        a.set_sealed_setting("sidebar.collapsedTags", b"[\"secret plans\"]")
+            .unwrap();
+        let raw = a
+            .storage()
+            .unwrap()
+            .setting("sidebar.collapsedTags")
+            .unwrap()
+            .unwrap();
+        assert!(!raw.contains("secret"));
+        assert_eq!(
+            a.sealed_setting("sidebar.collapsedTags")
+                .unwrap()
+                .as_deref()
+                .map(Vec::as_slice),
+            Some(&b"[\"secret plans\"]"[..])
+        );
+        assert!(
+            reopen(&a)
+                .sealed_setting("sidebar.collapsedTags")
+                .unwrap()
+                .is_some()
+        );
+        // Another key can't read it; it reads as unset.
+        b.set_setting("sidebar.collapsedTags", &raw).unwrap();
+        let other =
+            Replica::open(b.storage().unwrap().clone(), VaultKey::generate().unwrap()).unwrap();
+        assert!(
+            other
+                .sealed_setting("sidebar.collapsedTags")
+                .unwrap()
+                .is_none()
+        );
+        assert!(a.sealed_setting("missing").unwrap().is_none());
     }
 
     /// What a server would send for `r`'s outbox, numbered from `seq`.

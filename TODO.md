@@ -40,8 +40,8 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 ## Wave 2
 
-- [ ] `desktop-app-shell`: Tauri desktop app with sign-in, tag sidebar, note list, editor, search
-  - Needs: `note-editor-component`. Should follow `invite-codes` (see above).
+- [x] `desktop-app-shell`: Tauri desktop app with sign-in, tag sidebar, note list, editor, search
+  - Permanent delete needs a connection (spec amended). Linux and Windows manual checks not done.
 
 > **Milestone: usable on desktop.** Accounts created from the server CLI.
 >
