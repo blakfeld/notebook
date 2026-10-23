@@ -45,6 +45,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }
+tempfile.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 getrandom = { workspace = true, features = ["wasm_js"] }

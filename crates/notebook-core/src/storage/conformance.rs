@@ -17,6 +17,7 @@ use crate::note::NoteId;
 pub fn run_all<S: Storage>(mut make: impl FnMut() -> S) {
     create_note(make());
     append_local(make());
+    import_note(make());
     load_note(make());
     list_notes(make());
     outbox_order(make());
@@ -149,6 +150,39 @@ pub fn append_local<S: Storage>(mut s: S) {
         s.append_local(note(9), local(3)),
         Err(StorageError::NoteNotFound(note(9)))
     );
+    assert_eq!(outbox_ids(&s), [uid(1), uid(2)]);
+}
+
+/// An imported note loads with its key and base snapshot and no entries, is
+/// listed, and isn't pending; later local updates follow the base. A
+/// duplicate ID fails without changing the existing note.
+pub fn import_note<S: Storage>(mut s: S) {
+    let n = note(1);
+    s.import_note(n, b"key-1", b"snap-1").unwrap();
+    let stored = load(&s, n);
+    assert_eq!(stored.wrapped_key, b"key-1");
+    assert_eq!(stored.base.as_deref(), Some(&b"snap-1"[..]));
+    assert!(stored.entries.is_empty());
+    assert_eq!(s.list_notes().unwrap(), [n]);
+    assert!(s.outbox().unwrap().is_empty());
+    assert!(s.pending_keys().unwrap().is_empty());
+
+    s.create_note(note(2), b"key-2", local(1)).unwrap();
+    for id in [n, note(2)] {
+        let before = load(&s, id);
+        assert_eq!(
+            s.import_note(id, b"other", b"other"),
+            Err(StorageError::DuplicateNote(id))
+        );
+        assert_eq!(load(&s, id), before);
+    }
+    assert_eq!(s.list_notes().unwrap(), [n, note(2)]);
+
+    s.append_local(n, local(2)).unwrap();
+    let stored = load(&s, n);
+    assert_eq!(stored.base.as_deref(), Some(&b"snap-1"[..]));
+    assert_eq!(entry_ids(&stored), [Some(uid(2))]);
+    assert_eq!(stored.entries[0].bytes, local(2).bytes);
     assert_eq!(outbox_ids(&s), [uid(1), uid(2)]);
 }
 

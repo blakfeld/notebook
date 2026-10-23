@@ -16,7 +16,7 @@ use super::{AuthSecret, CryptoError, RecoveryKey, VaultId};
 
 const BUNDLE_VERSION: u8 = 1;
 const KIND_VAULT_KEY_AUTH: u8 = 32;
-const KIND_VAULT_KEY_RECOVERY: u8 = 33;
+pub(super) const KIND_VAULT_KEY_RECOVERY: u8 = 33;
 
 /// The vault key wrapped under an [`AuthSecret`] and, separately, under the
 /// [`RecoveryKey`]. The server stores it as opaque bytes and can't unwrap it;
@@ -162,7 +162,7 @@ impl KeyBundle {
     }
 }
 
-fn wrap(
+pub(super) fn wrap(
     key: &SymmetricKey,
     vault: VaultId,
     kind: u8,
@@ -176,7 +176,7 @@ fn wrap(
     envelope::seal(key.as_bytes(), &ctx, vault_key.0.as_bytes())
 }
 
-fn unwrap(
+pub(super) fn unwrap(
     key: &SymmetricKey,
     vault: VaultId,
     kind: u8,
