@@ -12,16 +12,23 @@
   let { onClose }: Props = $props()
 
   const vault = useVault()
-  const { core, phase, settings, sync } = vault
+  const { core, phase, settings, sync, preferences } = vault
 
   /**
    * The screen's sections, in order. Other capabilities add theirs here
-   * (Appearance from `editor-live-preview`, Export from `markdown-export`).
+   * (Export from `markdown-export`).
    */
   const SECTIONS = [
     { id: 'account', label: 'Account' },
+    { id: 'appearance', label: 'Appearance' },
     { id: 'editor', label: 'Editor' },
     { id: 'export', label: 'Export' },
+  ] as const
+
+  const THEMES = [
+    { value: 'system', label: 'System' },
+    { value: 'light', label: 'Light' },
+    { value: 'dark', label: 'Dark' },
   ] as const
   type Section = (typeof SECTIONS)[number]['id']
 
@@ -309,6 +316,28 @@
               <p class="form-error" role="alert">{accountError}</p>
             {/if}
           </div>
+        {:else if section === 'appearance'}
+          <fieldset class="group" aria-describedby="theme-hint">
+            <legend>Theme</legend>
+            <div class="choices">
+              {#each THEMES as { value, label } (value)}
+                <label class="toggle">
+                  <input
+                    type="radio"
+                    name="theme"
+                    {value}
+                    checked={$preferences.theme === value}
+                    onchange={() => preferences.set('theme', value)}
+                  />
+                  {label}
+                </label>
+              {/each}
+            </div>
+            <p class="hint" id="theme-hint">
+              System follows your device’s light or dark setting. Applies to
+              this device only.
+            </p>
+          </fieldset>
         {:else if section === 'editor'}
           <div class="group">
             <label class="toggle">
@@ -483,6 +512,25 @@
   .path {
     overflow-wrap: anywhere;
     font-family: ui-monospace, monospace;
+  }
+
+  fieldset {
+    margin: 0;
+    padding: 0;
+    border: none;
+  }
+
+  legend {
+    padding: 0;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    font-size: 0.95rem;
+  }
+
+  .choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
   }
 
   .toggle {

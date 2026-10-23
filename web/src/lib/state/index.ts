@@ -1,5 +1,6 @@
 import { getContext, setContext } from 'svelte'
 import type { CoreApi } from '../../platform'
+import type { PreferencesStore } from '../preferences'
 import { NotesState } from './notes.svelte'
 import { PhaseState } from './phase.svelte'
 import { SelectionState } from './selection.svelte'
@@ -24,11 +25,17 @@ export interface Vault {
   notes: NotesState
   sync: SyncStatusState
   settings: SettingsState
+  /** Theme and editor view preferences; these outlive the vault. */
+  preferences: PreferencesStore
   /** The mounted editor, set by the editor pane, for flushing edits. */
   editor: { flush(): Promise<boolean> } | null
 }
 
-export function createVault(core: CoreApi, phase: PhaseState): Vault {
+export function createVault(
+  core: CoreApi,
+  phase: PhaseState,
+  preferences: PreferencesStore,
+): Vault {
   const selection = new SelectionState()
   return {
     core,
@@ -37,6 +44,7 @@ export function createVault(core: CoreApi, phase: PhaseState): Vault {
     notes: new NotesState(core, selection),
     sync: new SyncStatusState(core),
     settings: new SettingsState(core),
+    preferences,
     editor: null,
   }
 }

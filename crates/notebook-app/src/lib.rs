@@ -60,6 +60,7 @@ fn register<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::editor_close,
         commands::get_settings,
         commands::set_vim_mode,
+        commands::set_preference,
         commands::set_tag_expanded,
     ])
 }
@@ -101,6 +102,7 @@ fn device() -> Device {
 pub fn run() {
     register(Builder::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;

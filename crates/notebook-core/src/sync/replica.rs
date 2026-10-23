@@ -900,6 +900,14 @@ mod tests {
         ) -> Result<(), StorageError> {
             self.inner.create_note(id, wrapped_key, initial)
         }
+        fn import_note(
+            &mut self,
+            id: NoteId,
+            wrapped_key: &[u8],
+            snapshot: &[u8],
+        ) -> Result<(), StorageError> {
+            self.inner.import_note(id, wrapped_key, snapshot)
+        }
         fn append_local(&mut self, id: NoteId, update: LocalUpdate) -> Result<(), StorageError> {
             if std::mem::take(&mut self.fail) {
                 return Err(StorageError::Backend("disk full".into()));

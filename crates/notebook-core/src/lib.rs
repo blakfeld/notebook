@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod backup;
 pub mod crypto;
 pub mod document;
 pub mod export;
@@ -14,6 +15,7 @@ pub mod search;
 pub mod storage;
 pub mod sync;
 pub mod tags;
+pub mod time;
 pub mod workspace;
 
 /// Returns the version of `notebook-core`.

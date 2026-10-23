@@ -11,6 +11,10 @@ export default defineConfig({
   // Component tests mount Svelte's client build, not its server one.
   resolve: process.env.VITEST ? { conditions: ['browser'] } : undefined,
   clearScreen: false,
+  // Fonts stay files: the CSP's `default-src 'self'` refuses `data:` fonts.
+  build: {
+    assetsInlineLimit: (file) => (file.endsWith('.woff2') ? false : undefined),
+  },
   server: {
     port: 5173,
     strictPort: true,

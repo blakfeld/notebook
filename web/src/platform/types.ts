@@ -72,8 +72,13 @@ export interface VaultChanged {
   tree_changed: boolean
 }
 
+export type ThemePreference = 'system' | 'light' | 'dark'
+
 export interface Settings {
   vim_mode: boolean
+  theme: ThemePreference
+  source_view: boolean
+  focus_mode: boolean
   /** Tag paths, lowercased, that the user collapsed in the sidebar. */
   collapsed_tags: string[]
 }

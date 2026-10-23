@@ -6,5 +6,6 @@ export {
   VIM_MODE_KEY,
   type NoteEditorHandle,
   type NoteEditorOptions,
+  type ViewOption,
 } from './noteEditor'
 export { findTagRanges } from './tags'

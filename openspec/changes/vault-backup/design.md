@@ -39,10 +39,13 @@ offset  size  field
 The payload envelope seals, under the **vault key** with a new envelope kind 48 bound to the vault ID, this plaintext:
 
 ```
-u64 BE   created_at (Unix ms)
+32       SHA-256 of the header (bytes 0 to 27+r)
+i64 BE   created_at (Unix ms)
 u32 BE   note count
 repeat:  note id (16) | u16 BE wrapped-key len | wrapped key | u32 BE snapshot len | encrypted snapshot
 ```
+
+The header hash makes the cleartext header tamper-evident. The envelope context authenticates only the vault ID and kind, so without it a changed byte in the recovery entry would still open with the vault key.
 
 The vault key is used directly with a distinct, authenticated kind, the same way it already wraps note keys (kind 16). An HKDF-derived subkey was considered and adds nothing, since the kind is authenticated and nonces are random 192-bit. The header's vault ID is authenticated through the envelope context, so swapping headers between vaults fails to open. The snapshots inside are still encrypted under each note key (double encryption). This keeps the payload a straight dump of what `local-storage` already accepts, so restore never handles plaintext outside a `NoteDocument`.
 
@@ -52,13 +55,17 @@ The vault key is used directly with a distinct, authenticated kind, the same way
 
 ```rust
 pub struct BackupNote { pub id: NoteId, pub wrapped_key: Vec<u8>, pub snapshot: EncryptedSnapshot }
-pub fn build(vault: VaultId, recovery: &RecoveryEntry, vault_key: &VaultKey,
+// The vault is the recovery entry's.
+pub fn build(recovery: &RecoveryEntry, vault_key: &VaultKey,
              created_at: Timestamp, notes: &[BackupNote]) -> Result<Vec<u8>, BackupError>;
 pub struct BackupHeader { pub version: u8, pub vault: VaultId, pub recovery: RecoveryEntry }
+impl BackupHeader { pub fn vault_key(&self, recovery: &RecoveryKey) -> Result<VaultKey, BackupError> } // WrongKey
 pub fn read_header(bytes: &[u8]) -> Result<BackupHeader, BackupError>;   // NotABackup / TooNew / Damaged
 pub fn open(bytes: &[u8], vault_key: &VaultKey) -> Result<OpenedBackup, BackupError>;
-impl OpenedBackup { pub fn verify(&self) -> Result<(), BackupError> }  // unwrap every key, load every snapshot
+impl OpenedBackup { pub fn verify(&self, vault_key: &VaultKey) -> Result<(), BackupError> }  // unwrap every key, load every snapshot
 ```
+
+`backup::file_name` and `BackupFileName` cover naming, and the shared stamp formatter is `notebook_core::time::stamp`. The writer and retention (Decisions 4 and 5) are `notebook_core::backup::folder`, compiled only for native targets, so the app only wires them up.
 
 `verify` opens each note into a throwaway `NoteDocument` and checks it yields a `Note`. That is the "check everything before changing anything" step of restore. The module builds for wasm32, like the rest of core.
 
@@ -68,11 +75,11 @@ Under the replica lock: for each loaded note, take `doc.snapshot()` and the wrap
 
 ### 4. Writing: temp file then rename
 
-Write to `.notebook-backup-<random>.partial` in the chosen folder with `create_new`, `fsync`, then resolve a free final name (`notebook-backup-<stamp>.nbbackup`, then ` 2`, …) and rename. Same-directory rename is atomic, and Dropbox, iCloud, and OneDrive only see the final file appear. Partial files with our prefix are deleted at the start of each backup. The folder's existence is checked before writing, and it is never created (spec "Backup folder"), so an unmounted cloud drive can't make us write into a stray local directory.
+Write to `.notebook-backup-<random>.partial` in the chosen folder with `create_new`, `fsync`, then hard-link it to the first free final name (`notebook-backup-<stamp>.nbbackup`, then ` 2`, …) and remove the partial. A hard link fails rather than replace a file a sync client created in the meantime; where hard links aren't supported (FAT, exFAT) it falls back to check-then-rename. Same-directory links and renames are atomic, so nothing under a backup name is ever partial (a sync client may still upload the hidden partial, which is ciphertext). Partial files with our prefix are deleted at the start of each backup. The folder's existence is checked before writing, and it is never created (spec "Backup folder"), so an unmounted cloud drive can't make us write into a stray local directory.
 
 ### 5. Retention
 
-After a successful write, list the folder and keep only names matching `^notebook-backup-\d{8}-\d{6}( \d+)?\.nbbackup$`. Read each one's header (first 27 + r bytes) and keep only those for this vault. Sort by stamp then suffix, and delete beyond `backup.keep`. Dropbox "conflicted copy" files and renamed backups don't match the pattern and are never touched. A header read failure means skip that file, not delete it.
+After a successful write, list the folder and keep only names matching `^notebook-backup-\d{8}-\d{6}( \d+)?\.nbbackup$`. Read each one's header (first 27 + r bytes) and keep only those for this vault. Sort by stamp then suffix, and delete beyond `backup.keep`. Dropbox "conflicted copy" files and renamed backups don't match the pattern and are never touched. A header read failure means skip that file, not delete it. Names and headers are unauthenticated, so the backup just written is never deleted and files stamped more than a day past now are ignored; otherwise planted or clock-skewed future-dated files would sort as newest and push out every real backup.
 
 ### 6. Scheduling
 

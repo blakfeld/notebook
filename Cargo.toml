@@ -67,6 +67,7 @@ tauri = { version = "2.12.4", features = [] }
 tauri-build = { version = "2.7.3", features = [] }
 # The folder picker for export runs on the Rust side; no JS dialog permission.
 tauri-plugin-dialog = "2.8.3"
+tauri-plugin-opener = "2.5.3"
 tempfile = "3.27.0"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros"] }
 tokio-tungstenite = "0.29.0"

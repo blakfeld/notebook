@@ -21,10 +21,39 @@ describe('coreSettings', () => {
     expect(core.callsTo('setVimMode')).toEqual([[true]])
   })
 
+  it('maps the UI preferences to setPreference', async () => {
+    const core = new FakeCoreApi()
+    const settings = coreSettings(core)
+    expect(await settings.get('appearance.theme')).toBe('system')
+    expect(await settings.get('editor.sourceView')).toBe('false')
+    await settings.set('appearance.theme', 'dark')
+    await settings.set('editor.focusMode', 'true')
+    // Tracked per key: same value as vim mode, still written.
+    await settings.set('editor.vimMode', 'true')
+    expect(core.settings.theme).toBe('dark')
+    expect(core.settings.focus_mode).toBe(true)
+    expect(core.callsTo('setPreference')).toEqual([
+      ['appearance.theme', 'dark'],
+      ['editor.focusMode', 'true'],
+    ])
+    expect(await settings.get('editor.focusMode')).toBe('true')
+  })
+
+  it('retries a value whose write failed', async () => {
+    const core = new FakeCoreApi()
+    const settings = coreSettings(core)
+    core.failNext('setPreference', 'internal')
+    await expect(settings.set('appearance.theme', 'dark')).rejects.toEqual(
+      expect.objectContaining({ code: 'internal' }),
+    )
+    await settings.set('appearance.theme', 'dark')
+    expect(core.settings.theme).toBe('dark')
+  })
+
   it('has no other keys', async () => {
     const settings = coreSettings(new FakeCoreApi())
-    expect(await settings.get('appearance.theme')).toBeNull()
-    await expect(settings.set('appearance.theme', 'dark')).rejects.toThrow()
+    expect(await settings.get('sidebar.width')).toBeNull()
+    await expect(settings.set('sidebar.width', '200')).rejects.toThrow()
   })
 })
 

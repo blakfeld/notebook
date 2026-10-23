@@ -88,6 +88,11 @@ export interface CoreApi {
   // ---- device settings ----
   getSettings(): Promise<Settings>
   setVimMode(on: boolean): Promise<void>
+  /**
+   * Stores a UI preference: `appearance.theme` (`system`, `light`, `dark`),
+   * `editor.sourceView` or `editor.focusMode` (`true`, `false`).
+   */
+  setPreference(key: string, value: string): Promise<void>
   setTagExpanded(path: string, expanded: boolean): Promise<void>
 
   /**

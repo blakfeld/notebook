@@ -195,6 +195,12 @@ pub trait Storage {
     /// [`StorageError::DuplicateUpdate`] if the update's ID is.
     fn create_note(&mut self, id: NoteId, wrapped_key: &[u8], initial: LocalUpdate) -> Result<()>;
 
+    /// Stores a note restored from a backup: its wrapped key (not pending
+    /// upload) and `snapshot` as its base, with no log or outbox entries.
+    ///
+    /// Fails with [`StorageError::DuplicateNote`] if `id` is stored.
+    fn import_note(&mut self, id: NoteId, wrapped_key: &[u8], snapshot: &[u8]) -> Result<()>;
+
     /// Appends a local update to the end of note `id`'s log and to the outbox.
     ///
     /// Fails with [`StorageError::NoteNotFound`] if `id` isn't stored, or

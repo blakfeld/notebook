@@ -48,7 +48,7 @@ Hidden markers are not registered with `EditorView.atomicRanges`. A cursor can o
 
 ### 4. Checkboxes as widgets that dispatch ordinary transactions
 
-`[ ]`/`[x]` (the GFM `TaskMarker` node) is replaced by a `CheckboxWidget` (`<input type="checkbox">` with `aria-label`). It handles `pointerdown` (so mouse, pen, and touch all work), calls `preventDefault()` so the selection doesn't move, and dispatches `{changes: {from: markerPos + 1, to: markerPos + 2, insert: checked ? ' ' : 'x'}, userEvent: 'input.toggle-task'}`. This is a plain local transaction, so it flows through the Yjs binding, is captured by the local `Y.UndoManager`, and is saved like typing. `ignoreEvent()` returns false only for the handled events.
+`[ ]`/`[x]` (the GFM `TaskMarker` node) is replaced by a `CheckboxWidget` (`<input type="checkbox">` with `aria-label`). It calls `preventDefault()` on `pointerdown` and `mousedown` so the selection doesn't move, and on `click` dispatches `{changes: {from: markerPos + 1, to: markerPos + 2, insert: checked ? ' ' : 'x'}, userEvent: 'input.toggle-task'}`. This is a plain local transaction, so it flows through the Yjs binding, is captured by the local `Y.UndoManager`, and is saved like typing. `ignoreEvent()` returns false only for the handled events.
 
 The toggle-task command is bound to `Mod-Enter` in the live-preview keymap (CM's default `insertBlankLine` on `Mod-Enter` is low value in prose). It is registered at higher precedence than the vim keymap so it works in vim normal and insert modes. It edits the same character, or inserts `[ ] ` after a bullet or ordered list marker.
 
