@@ -82,32 +82,16 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 1. [ ] `vault-backup`, **app part** (task groups 4–6): scheduler, Back up now, Settings section, welcome-screen and settings restore, sidebar notice
    - Needs: `local-only-desktop` (welcome screen, phases, recovery entry).
-2. [~] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
-   - In progress (branch `worktree-virtual-imagining-lightning`, uncommitted), 12 of 13 tasks done.
-     Started on top of main at `c12e62d`, where `local-only-desktop` code is merged (#16) but not archived (its
-     manual checks are pending), so this change can be built but not archived until that one is.
-   - Done: server crate, `auth`, `protocol`, and `sync` deleted; `Replica` moved to `notebook_core::replica` and
-     compacts a note's log locally past 200 entries; `Storage` trait without outbox, cursor, update IDs, or
-     pending keys; SQLite layout v3 upgrade that drops the sync columns and keeps every log entry (tests seed v1
-     and v2 stores with real encrypted notes); key bundle, recovery verifier, and OPAQUE stretching removed;
-     20 workspace dependencies dropped (139 fewer packages in `Cargo.lock`, no new duplicates); CI, `check.sh`,
-     and `CLAUDE.md` item 4 run the wasm32 check without features; README server sections replaced by an
-     operator shutdown note; `mobile-developer` agent deleted and the other agents made desktop-only.
-     fmt, both clippy runs, all tests, `scripts/check.sh`, and `openspec validate --strict` pass.
-   - Code review and security-analyst pass done; all findings fixed:
-     - Compaction now applies every stored entry before snapshotting, so it can't drop edits another app instance
-       wrote to the same database.
-     - Entries with an unknown envelope version or algorithm are never compacted away, like unknown document formats.
-     - Added tests for a failed compaction (the edit still succeeds; the retry waits 200 entries) and for both cases above.
-     - `serde`/`serde_json` moved to dev-dependencies.
-     - New `local-storage` requirement "Long logs are compacted locally"; the sync-client removals point at it.
+2. [x] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
+   - Archived as `2026-10-23-retire-sync-server` (PR #19, branch `worktree-virtual-imagining-lightning`). 12 of 13
+     tasks done; code review and security-analyst findings fixed.
+   - Open manual check (7.1): upgrade a copy of a real `local-only-desktop` data directory, confirm every note opens
+     and edits, then edit one note heavily and confirm its log compacts.
    - Deferred (pre-existing, minor): `SqliteStorage::open` runs migrations before the vault-binding check, so opening
      a store for the wrong vault still upgrades its layout (data kept).
-   - Left: 7.1, manual: upgrade a copy of a real `local-only-desktop` data directory, confirm every note opens and
-     edits, then edit one heavily and confirm its log compacts. Then archive (after `local-only-desktop` and
-     `vault-backup`).
-   - Needs: `local-only-desktop`.
-   - Archive after `vault-backup`, so users can take a backup before the storage schema upgrade drops sync data.
+   - Merge note: the `vault-backup`/`local-only-desktop` archive commit (`8a8015d`, branch
+     `worktree-cached-noodling-knuth`) also edits `openspec/specs/local-storage/spec.md` (ADDED import). Whichever
+     lands second resolves that file by keeping both; the conflict is mechanical.
 
 > **Milestone: safe local-only app.** Encrypted backups land in Dropbox (or any
 > synced folder) automatically and restore on a new computer with the recovery
@@ -130,9 +114,8 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
     each through different requirements, so they archive in any order.
   - `local-storage` is modified by `vault-backup` (ADDED import) and `retire-sync-server`
     (removals and rewrites), which also don't collide.
-- **After `retire-sync-server` is archived:**
-  - Delete the five empty retired spec directories (`accounts`, `invites`, `server-hosting`, `sync-protocol`, `sync-client`).
-  - Fix the Purpose lines of `app-shell`, `local-storage`, and `vault-crypto`.
+- **After `retire-sync-server` was archived:** done in the archive. The five retired spec directories are deleted,
+  and the Purpose lines of `app-shell`, `local-storage`, and `vault-crypto` are updated.
 
 ## Later / out of scope for now
 
