@@ -108,6 +108,18 @@ impl Registration {
         device: Device,
         now_ms: u64,
     ) -> Result<(RegisterFinishRequest, NewAccount), AuthError> {
+        self.finish_with_recovery_key(response, device, now_ms, RecoveryKey::generate()?)
+    }
+
+    /// As [`finish`](Self::finish), with a recovery key generated earlier,
+    /// so the user can see and acknowledge it before the account exists.
+    pub fn finish_with_recovery_key(
+        self,
+        response: &RegisterStartResponse,
+        device: Device,
+        now_ms: u64,
+        recovery_key: RecoveryKey,
+    ) -> Result<(RegisterFinishRequest, NewAccount), AuthError> {
         let (upload, auth) = finish_registration(
             self.state,
             &self.passphrase,
@@ -117,7 +129,6 @@ impl Registration {
         SecureRng.fill_bytes(&mut random);
         let vault_id = VaultId::from_parts(now_ms, u128::from_le_bytes(random));
         let vault_key = VaultKey::generate()?;
-        let recovery_key = RecoveryKey::generate()?;
         let bundle = KeyBundle::create(vault_id, &vault_key, &auth, &recovery_key)?;
         let request = RegisterFinishRequest {
             username: self.username.to_string(),

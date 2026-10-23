@@ -36,6 +36,7 @@ mod bundle;
 mod envelope;
 mod kdf;
 mod keys;
+mod local_unlock;
 mod recovery;
 mod secret;
 
@@ -49,6 +50,7 @@ pub use envelope::{ALGORITHM_XCHACHA20POLY1305, ENVELOPE_OVERHEAD, ENVELOPE_VERS
 pub(crate) use kdf::stretch;
 pub use kdf::{KdfVersion, Salt, derive_auth_secret};
 pub use keys::{NoteKey, PayloadKind, VaultKey};
+pub use local_unlock::LocalUnlock;
 pub use recovery::{RECOVERY_VERIFIER_LEN, RecoveryKey};
 pub use secret::{AuthSecret, MIN_AUTH_SECRET_LEN};
 

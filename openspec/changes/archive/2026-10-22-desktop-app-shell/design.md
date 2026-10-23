@@ -15,6 +15,37 @@ See proposal.md (Why). Today `crates/notebook-app` is the scaffold: one `core_ve
 | `sync-protocol` | `sync-server` | indirectly, through the engine |
 | `note-editor` | `note-editor-component` | the editor component and its integration interface |
 
+### Verified upstream APIs (task 1.1)
+
+All six prerequisite changes are archived (`openspec/changes/archive/2026-10-2{1,2}-*`). Checked against the code on 2026-10-22:
+
+| assumed API | actual | status |
+|---|---|---|
+| `Replica::notes()` / `note(id)` | `fn notes(&self) -> Vec<Note>`; `fn note(&self, id: NoteId) -> Option<Note>` | matches |
+| `Replica::create_note` | `fn create_note(&mut self, body: &str, now: Timestamp) -> Result<NoteId, ReplicaError>` | matches |
+| `Replica::set_body` / flag setters | `fn set_body(&mut self, id, body: &str, now) -> Result<(), ReplicaError>`; `set_pinned/set_archived/set_trashed(&mut self, id, bool) -> Result<(), ReplicaError>` | matches |
+| `Replica::purge` (queue purge, remove locally) | **does not exist.** Purge is `SyncHandle::purge(&self, NoteId) -> impl Future<Output = Result<(), SyncError>>`: "Needs a connection; on failure nothing changes." Returns `SyncError::NotTrashed` / `NoteNotFound` / `Offline` | **mismatch M1** |
+| `Replica::pending` | `fn pending(&self) -> Result<usize, StorageError>` | matches |
+| `SyncHandle` | `wake()`, `async flush() -> Result<(), SyncError>`, `async purge(NoteId)`, `set_session()`, `shutdown()`; `Clone` | matches (plus `purge`) |
+| `SyncEngine::new` | `new(Shared<Replica<S>>, T: Transport, M: Timer, A: SessionSource, SyncConfig, Reopen<S>) -> (SyncEngine, SyncHandle, mpsc::UnboundedReceiver<SyncEvent>)`; `Reopen<S> = Box<dyn FnMut() -> Result<S, StorageError>>`; `async run(self)`, not `Send` | matches |
+| `SyncEvent` | `Status(SyncStatus)`, `NotesChanged(Vec<NoteId>)`, `IntegrityWarning(NoteId)` | matches |
+| `SyncStatus` | `{ state: SyncState { Synced, Syncing, Offline }, pending: usize, attention: Option<Attention>, integrity_warnings: u32 }`; `Attention { SignInRequired, UpgradeRequired, QuotaFull, UpdateTooLarge(NoteId), PushBlocked }` | matches, but `attention` is a single `Option` (not a list) and there is an extra `PushBlocked` the design's `attention` list lacks (minor, M5) |
+| `SessionSource` | host-implemented: `access_token(&self) -> Option<AccessToken>`, `refresh(&self) -> impl Future<Output = Result<(), RefreshError>>` | matches; the host also has to do the refresh HTTP call itself (see M2) |
+| device-local settings | `Storage::setting(&self, &str) -> Result<Option<String>>`, `Storage::set_setting(&mut self, &str, &str) -> Result<()>`. `Replica` exposes only `storage(&self) -> Result<&S, _>`; `storage_mut` is `pub(crate)` | **mismatch M3**: no way to write a setting while the replica owns the store |
+| `accounts` client | sans-I/O: `Registration::start(username, passphrase, invite_code)` / `finish(&RegisterStartResponse, Device, now_ms) -> (RegisterFinishRequest, NewAccount)`; `Login::start/finish -> (LoginFinishRequest, LoginKeys)`; `LoginKeys::unlock(&[u8]) -> Result<VaultKey, AuthError>`; `PassphraseChange::start(old, new)` / `finish(&resp, current_bundle)`; `Recovery::start(username, RecoveryKey, new)` / `finish(&resp, Device)`; `RefreshOutcome::classify` | APIs match, but **no HTTP client for `/auth/*` exists anywhere** (M2) |
+| authenticated key-bundle read | server `GET /auth/key-bundle` → `KeyBundleResponse { key_bundle }` | exists on the server; no client call (part of M2) |
+| storage open | `SqliteStorage::open(path, VaultId)`, `SqliteStorage::delete_database(path)` | matches; the vault id must be kept alongside the session entry |
+| local-unlock / auto-unlock key material | `derive_auth_secret(passphrase, &Salt, KdfVersion) -> AuthSecret`. `VaultKey` has no byte export/import, `AuthSecret` has none either, and the envelope (`seal`/`open`) is `pub(crate)` | **mismatch M4**: the app can neither store the vault key (auto-unlock) nor wrap it under a passphrase-derived key (local-unlock) |
+| editor host interface | `Replica::editor_attach(id) -> (EditorSessionId, EditorUpdate)`, `apply_editor_update(session, &EditorUpdate, now) -> Result<bool, _>`, `editor_pending(session) -> Result<Option<EditorUpdate>, _>`, `editor_detach(session)`; TS `NoteDocBridge { open(noteId) -> OpenNoteDoc { initialState, push, onRemote, close } }`; vim mode via TS `DeviceSettings` key `editor.vimMode` | matches |
+
+Mismatches and their resolutions (decided 2026-10-22):
+
+- **M1 – purge needs a connection.** The design's offline-queued `Replica::purge` doesn't exist; `SyncHandle::purge` requires the server and changes nothing when offline. That conflicts with the spec's "Every note operation SHALL work offline" for Delete permanently. **Resolved:** permanent delete is online-only; the spec says so (Delete permanently, Offline editing is durable) and the command returns `offline`.
+- **M2 – no auth HTTP client.** `accounts` is sans-I/O and the sync transport covers only `/sync/v1`. Someone must send `/auth/{register,login,recover}/{start,finish}`, `/auth/refresh`, `/auth/key-bundle`, `/auth/logout`, and `/auth/passphrase/*`, and implement `SessionSource`. To keep the browser client able to reuse it, this belongs in `notebook-core` next to the sync transports (native reqwest / wasm fetch), not in the app crate. **Resolved:** new `notebook_core::auth::http` (task 2.5): an `AuthClient` over a small `AuthHttp` trait with native (reqwest), wasm (gloo-net), and test implementations, plus `AuthSession`, a `SessionSource` that refreshes through it and hands rotated refresh tokens to a host callback for storage. The server revokes a session when a refresh token is reused, so both sides share one `SessionTokens` that serializes refreshes (an async lock plus a generation counter: a waiter reuses another's result). After each refresh it also fetches the key bundle and passes it to the callback, which is where the fingerprint check runs. `Registration::finish_with_recovery_key` lets `register` use the key `generate_recovery_key` showed earlier.
+- **M3 – no settings write through the replica.** Add a public `Replica::set_setting` (or make settings a separate small store), so `set_vim_mode`, `set_tag_expanded`, and the locked hint can be written while unlocked. **Resolved:** `Replica::set_setting` (task 2.3). While locked or signed out the app opens the store directly to read and write settings.
+- **M4 – no way to persist key material.** Auto-unlock and local-unlock need new `crypto` API: an exportable/importable `VaultKey` (zeroized), and wrapping a `VaultKey` under an `AuthSecret` with the envelope (a "local unlock blob" type with salt, KDF version, and AAD bound to the vault id). **Resolved:** task 2.4 adds `VaultKey::to_secret_bytes`/`from_secret_bytes` (zeroizing) and `crypto::LocalUnlock` (`seal(vault, &VaultKey, passphrase)` / `open(passphrase)`, Argon2id via `derive_auth_secret`).
+- **M5 – attention is one value.** `SyncStatus::attention` is `Option<Attention>` plus a separate `integrity_warnings` counter, and includes `PushBlocked`. The `sync-status` event can still carry a list, built from `attention` and `integrity_warnings > 0`; add `push_blocked` to it. No upstream change needed. **Resolved:** done that way in task 5.2.
+
 Requirements are in `specs/app-shell/spec.md`. The browser client (`browser-web-client`) reuses the frontend and the same core logic over WASM, so anything that isn't Tauri-specific must live in `notebook-core` or behind the TS platform adapter.
 
 ## Goals / Non-Goals
@@ -74,7 +105,7 @@ Commands (all `async`, all return `Result<Dto, AppError>`):
 
 Events: `app-phase-changed`, `sync-status` (`{state, pending, attention}` where `state` is `synced | syncing | offline` and `attention` lists any of `sign_in_required`, `upgrade_required`, `quota_full`, `update_too_large`, `integrity_warning`, mapped from the engine's `SyncStatus`), `vault-changed` (`{changed: NoteId[], tree_changed: bool}`), and the editor's remote-update event.
 
-- `AppError { code, message }` with stable `code` strings (`invalid_server_url`, `bad_credentials`, `unreachable`, `rate_limited`, `invalid_invite`, `username_taken`, `quota_exceeded`, `recovery_key_malformed`, `recovery_key_wrong`, `wrong_passphrase`, `offline`, `invalid_tag_name`, `locked`, `not_found`, `internal`). `invalid_invite` and `quota_exceeded` match the codes `invite-codes` uses; A quota refusal during sync is not a command error: it appears in the sync status as the engine's `quota_full` attention flag. The frontend maps codes to messages; `bad_credentials` is the only code for unknown-user and wrong-passphrase (the OPAQUE layer already can't distinguish them).
+- `AppError { code, message }` with stable `code` strings (`invalid_server_url`, `invalid_username`, `passphrase_too_short`, `passphrase_mismatch`, `bad_credentials`, `unreachable`, `rate_limited`, `invalid_invite`, `username_taken`, `recovery_key_required`, `recovery_key_malformed`, `recovery_key_wrong`, `wrong_passphrase`, `sign_in_required`, `offline`, `pending_changes`, `invalid_tag_name`, `trashed`, `not_trashed`, `locked`, `not_found`, `internal`; the list in `notebook-app/src/error.rs` is authoritative). `invalid_invite` matches the code `invite-codes` uses. A quota refusal during sync is not a command error: it appears in the sync status as the engine's `quota_full` attention flag. The frontend maps codes to messages; `bad_credentials` is the only code for unknown-user and wrong-passphrase (the OPAQUE layer already can't distinguish them).
 - DTOs live in the app crate (`serde`), not in core, per the existing convention. Note ids cross as ULID strings.
 - `vault-changed` carries ids, not content: the frontend re-queries the current list and tree. That keeps one source of truth and makes "live updates" (spec) a single code path for local and remote changes.
 - **Alternative considered:** push full list deltas in events. Rejected as premature; re-querying a personal-scale list is cheap in-process.
@@ -87,7 +118,7 @@ The recovery key is generated by `generate_recovery_key`, which returns its disp
 
 ### Credentials and lock
 
-One keychain service `com.blakfeld.notebook`, accessed with the `keyring` crate (macOS Keychain, Windows Credential Manager, Linux Secret Service via `sync-secret-service` + `crypto-rust`), behind a `CredentialStore` trait with an in-memory implementation for tests and for the no-secure-store fallback. Entries (account key = install-scoped id):
+One keychain service `com.blakfeld.notebook`, accessed with the `keyring` crate, version 4 (its default `v1` feature and `keyring::Entry`, which picks the platform store itself: macOS Keychain, Windows Credential Manager, and Linux Secret Service over the pure-Rust zbus client with `crypto-rust`), behind a `CredentialStore` trait with an in-memory implementation for tests and for the no-secure-store fallback. Entries (account key = install-scoped id):
 
 | entry | contents | present when |
 |---|---|---|
@@ -98,7 +129,8 @@ One keychain service `com.blakfeld.notebook`, accessed with the `keyring` crate 
 - **Auto-unlock stores the vault key itself in the keychain.** Wrapping it under another key that also lives in the keychain adds nothing; the OS store is the boundary on desktop (spec: Credentials in the OS secure store).
 - **Lock** zeroizes the `Workspace` (keys drop and zeroize), stops sync, deletes `auto-unlock`, and records `locked` in device settings (a UX hint only; the missing entry is what enforces it).
 - **Unlock** with a passphrase: if the server is reachable, run OPAQUE login (fresh export key, fresh bundle), then rewrite `local-unlock` and `auto-unlock`. If unreachable, derive with Argon2id from `local-unlock` and unwrap. Argon2 runs in `spawn_blocking`. Online-first means a passphrase changed elsewhere is caught whenever possible.
-- **Passphrase changed elsewhere:** `local-unlock` stores a fingerprint (SHA-256) of the key bundle it was derived alongside. Whenever the app obtains the server's current bundle (login, and the bundle check after each session refresh), a mismatch deletes `local-unlock`; the next unlock then requires the server (spec). This needs `accounts` to let an authenticated client read its current key bundle; see Risks.
+- **Passphrase changed elsewhere:** `local-unlock` stores a fingerprint (SHA-256) of the key bundle it was derived alongside. Whenever the app obtains the server's current bundle (login, and the bundle check after each session refresh), a mismatch deletes `local-unlock`; the next unlock then requires the server (spec). In practice the server ends every other session on a passphrase change or recovery, so the device usually can't fetch the new bundle at all. The app therefore also **fails closed**: when sync reports `sign_in_required`, `local-unlock` is deleted, and the next unlock goes through the server, which checks the passphrase. A plain revocation costs one online unlock. `change_passphrase` likewise drops `local-unlock` before calling the server and rewraps it afterwards.
+- **Fallback mid-write:** if the OS store fails partway (for example a keychain that locks during sign-in), the entries already written there are deleted and every write is replayed into memory, so lock and sign-out never miss one.
 - **Change passphrase** on this device: OPAQUE change via `accounts`, then rewrite `local-unlock` with the new passphrase.
 - **No secure store** (keyring returns a platform/no-backend error on first write): use the in-memory store for the session, emit a notice, never fall back to files.
 - **Alternative considered:** unlock after lock requires the server. Rejected: an offline-first app that can't be opened offline after locking breaks the core promise, and mobile's auto-lock will make this path common.
@@ -106,7 +138,7 @@ One keychain service `com.blakfeld.notebook`, accessed with the `keyring` crate 
 
 ### Local data
 
-One SQLite database per install at `app_data_dir()/vault.sqlite3` via the `local-storage` SQLite implementation. Device-local settings (vim mode, tag expansion, locked hint) use the storage settings API. Sign-out: confirm if `pending_count > 0`, best-effort session revoke (short timeout), delete keychain entries, close and delete the database file (and its WAL/SHM), return to `SignedOut`.
+One SQLite database per install at `app_data_dir()/vault.sqlite3` via the `local-storage` SQLite implementation. Device-local settings (vim mode, tag expansion, locked hint) use the storage settings API. Collapsed tag paths are vault content, so they are stored sealed under the vault key (`Replica::set_sealed_setting`, envelope kind 17) and returned only while unlocked. Sign-out: confirm if `pending_count > 0`, best-effort session revoke (short timeout), delete keychain entries, close and delete the database file (and its WAL/SHM), return to `SignedOut`.
 
 ### Search
 
@@ -120,7 +152,7 @@ One SQLite database per install at `app_data_dir()/vault.sqlite3` via the `local
 
 - **Create:** `Workspace::create` calls `Replica::create_note` with body `"#<tag path>\n"` when a tag is selected (multi-word segments written `#a b/c d#` per the tag syntax), else empty. Display spelling of the selected tag is used.
 - **Trash read-only:** enforced in the frontend by opening the editor read-only *and* in core: `Workspace` (and the editor host path) rejects body changes to a trashed note before calling the replica, so a stale editor can't write.
-- **Delete permanently:** only for trashed notes; `Workspace` checks the trashed flag, then calls `Replica::purge` (which queues the purge and removes the note locally) and `SyncHandle::wake()`. After a purge while `quota_full`, the wake also lets the engine retry the push sooner.
+- **Delete permanently:** only for trashed notes; `Workspace` checks the trashed flag, then awaits `SyncHandle::purge`, which deletes it on the server and then locally, and needs a connection (M1): offline it returns `offline` and nothing changes. The engine's `NotesChanged` for the purged id refreshes the tree and index. After a purge while `quota_full`, `SyncHandle::wake()` lets the engine retry the push sooner.
 - **Rename tag:** `Workspace::rename_tag` runs `tags::rename` over all notes (including archived/trashed), then `Replica::set_body` on each affected note, producing one encrypted update per note through the outbox. Merging into an existing tag falls out of tag identity. Invalid names surface as `invalid_tag_name` before anything changes.
 
 ### Server address validation

@@ -11,6 +11,11 @@
 
 pub mod api;
 mod client;
+pub mod http;
+#[cfg(all(feature = "transport-native", not(target_arch = "wasm32")))]
+mod http_native;
+#[cfg(all(feature = "transport-wasm", target_arch = "wasm32"))]
+mod http_wasm;
 mod suite;
 mod username;
 
@@ -22,6 +27,10 @@ pub use client::{
     Device, Login, LoginKeys, MIN_PASSPHRASE_CHARS, NewAccount, PassphraseChange, Recovery,
     Registration,
 };
+#[cfg(all(feature = "transport-native", not(target_arch = "wasm32")))]
+pub use http_native::NativeAuthHttp;
+#[cfg(all(feature = "transport-wasm", target_arch = "wasm32"))]
+pub use http_wasm::WasmAuthHttp;
 pub use suite::{Argon2Ksf, SecureRng, Suite};
 pub use username::Username;
 

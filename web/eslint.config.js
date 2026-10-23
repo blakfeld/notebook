@@ -28,4 +28,24 @@ export default ts.config(
       },
     },
   },
+  // The UI reaches the core only through the platform adapter.
+  {
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['@tauri-apps/api', '@tauri-apps/api/*'],
+              message: 'Import the core through src/platform/ instead.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ['src/platform/**'],
+    rules: { 'no-restricted-imports': 'off' },
+  },
 )
