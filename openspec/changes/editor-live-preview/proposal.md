@@ -15,7 +15,7 @@ The note editor must be beautiful. The functional editor from `note-editor-compo
   - Links open in the system browser on Mod-click, and only for `http`, `https`, and `mailto` URLs. Live preview never fetches remote content: images and raw HTML stay as source text.
 - **Typography and layout**: a readable measure (max line width), self-hosted fonts (proportional prose plus monospace code), comfortable line height, and generous margins that shrink on narrow screens.
 - **Themes**: light and dark themes for the whole app that follow the OS preference, with a per-device manual override (System / Light / Dark) in Settings.
-- **Focus and polish**: optional focus mode that dims every block except the one holding the cursor, smooth cursor movement (off under reduced motion), and a subtle active-line treatment.
+- **Focus and polish**: optional focus mode that dims every block except the one holding the cursor, an immediate (unanimated) cursor, and a subtle active-line treatment.
 - Live preview must coexist with vim mode: vim motions operate on the underlying text, and syntax reveal follows the vim cursor and visual selection.
 - A raw source view toggle that turns off all live-preview rendering without reloading the editor. Source view and focus mode are per-device preferences.
 

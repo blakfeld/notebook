@@ -94,7 +94,7 @@ Self-hosted variable fonts via `@fontsource-variable/inter` (prose) and `@fontso
 
 ### 12. Cursor and active line
 
-`drawSelection()` (already present for vim) draws the cursor. A CSS `transition` on `.cm-cursor` `left`/`top` (~80ms) gives smooth movement and is disabled under `@media (prefers-reduced-motion: reduce)`. `highlightActiveLine()` with a low-alpha `--active-line` token gives the active-line treatment.
+`drawSelection()` (already present for vim) draws the cursor. It moves without a transition: an earlier ~80ms glide made the cursor trail typing and the editor feel slow. `highlightActiveLine()` with a low-alpha `--active-line` token gives the active-line treatment.
 
 ## Risks / Trade-offs
 

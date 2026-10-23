@@ -515,3 +515,30 @@ describe('remote edits', () => {
     ])
   })
 })
+
+describe('cursor and active line', () => {
+  /** Every CSS rule in the editor's shadow root, as text. */
+  function rules(view: EditorView): string[] {
+    const root = view.root as ShadowRoot
+    const sheets = [
+      ...(root.adoptedStyleSheets ?? []),
+      ...[...root.querySelectorAll('style')].map((s) => s.sheet!),
+    ]
+    return sheets.flatMap((sheet) => [...sheet.cssRules].map((r) => r.cssText))
+  }
+
+  it('moves the cursor with no transition', async () => {
+    const { view } = await editorWith('Hello')
+    const cursor = rules(view).filter((r) => r.includes('.cm-cursor'))
+    // The theme's own cursor rule is there, so the check isn't vacuous.
+    expect(cursor.some((r) => r.includes('border-left-width: 2px'))).toBe(true)
+    expect(cursor.filter((r) => r.includes('transition'))).toEqual([])
+  })
+
+  it('marks only the line holding a single cursor', async () => {
+    const { view } = await editorWith('one\ntwo\nthree')
+    select(view, view.state.doc.line(2).from + 1)
+    const active = [...view.contentDOM.querySelectorAll('.cm-activeLine')]
+    expect(active).toEqual([lineElement(view, 2)])
+  })
+})

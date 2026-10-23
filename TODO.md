@@ -62,12 +62,13 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
    - Needs: only `RecoveryEntry` from `local-only-desktop` task 1.1, which is small; land that first or stub it.
    - The app part is in wave 2. Keep it as one change; groups 4–6 wait for `local-only-desktop`.
 3. [~] `editor-live-preview`: hidden syntax, typography, themes, focus mode, source view
-   - In progress, 20 of 26 tasks done. Implementation from `origin/worktree-mellow-bubbling-swing` (`31cd30c`)
+   - In progress, 21 of 26 tasks done. Implementation from `origin/worktree-mellow-bubbling-swing` (`31cd30c`)
      brought onto post-pivot main (uncommitted in `worktree-warm-wiggling-pearl`), touch-tap link opening removed,
      code-reviewed and review findings fixed; fmt, clippy, and web checks pass.
-   - All code is written. Left: the manual desktop-app checks in 2.4, 4.4, 6.1, 6.3, 7.1, and 7.3 (CJK IME and
+   - All code is written. Left: the manual desktop-app checks in 2.4, 4.4, 6.1, 7.1, and 7.3 (CJK IME and
      real-webview typing feel; jsdom timings are in `tasks.md`), then a security-analyst pass on the opener
      capability and `set_preference`, then archive.
+   - Cursor glide dropped (6.3 now done): it made typing feel slow; spec, design, and tasks updated.
    - Needs: nothing outstanding. Updated for the pivot: no touch tap, no remote-edit requirement, no browser checks.
 4. [ ] `markdown-export`: export all notes as markdown into a chosen folder
    - Needs: nothing outstanding. Updated for the pivot: zip/browser output removed.

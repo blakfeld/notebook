@@ -173,11 +173,15 @@ The editor SHALL offer a focus mode, off by default. When on, every top-level ma
 - **THEN** the third paragraph is undimmed and the second is dimmed
 
 ### Requirement: Cursor and active line polish
-The editor SHALL animate cursor movement smoothly and mark the line holding the main cursor with a subtle background. When the OS or browser requests reduced motion, cursor movement SHALL NOT be animated.
+The editor SHALL move the cursor to its new position immediately, with no animation, and SHALL mark each line holding a cursor with a subtle background.
 
-#### Scenario: Reduced motion
-- **WHEN** the system requests reduced motion and the cursor moves
-- **THEN** the cursor jumps to its new position with no animation
+#### Scenario: Cursor follows typing
+- **WHEN** the user types a character
+- **THEN** the cursor is drawn after it in the same frame, with no transition
+
+#### Scenario: Active line
+- **WHEN** a single cursor is on a line
+- **THEN** that line has the active-line background and other lines don't
 
 ### Requirement: Raw source view
 The editor SHALL offer a source view in which all live-preview rendering is off and the note shows as highlighted markdown source, as defined by the base editor. Switching between live preview and source view SHALL NOT reload the editor and SHALL keep the cursor, selection, scroll position, undo history, and vim state.

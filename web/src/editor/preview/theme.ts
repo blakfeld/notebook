@@ -36,10 +36,6 @@ export const editorTheme = EditorView.theme({
   '.cm-cursor, .cm-dropCursor': {
     borderLeftColor: 'var(--text)',
     borderLeftWidth: '2px',
-    transition: 'left 80ms ease-out, top 80ms ease-out',
-  },
-  '@media (prefers-reduced-motion: reduce)': {
-    '.cm-cursor, .cm-dropCursor': { transition: 'none' },
   },
   '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
     { backgroundColor: 'var(--selection)' },
