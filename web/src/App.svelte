@@ -3,6 +3,7 @@
   import OldPassphrase from './lib/setup/OldPassphrase.svelte'
   import RecoveryKeyPrompt from './lib/setup/RecoveryKeyPrompt.svelte'
   import RecoveryKeyShown from './lib/setup/RecoveryKeyShown.svelte'
+  import RestoreBackup from './lib/setup/RestoreBackup.svelte'
   import Welcome from './lib/setup/Welcome.svelte'
   import Shell from './lib/shell/Shell.svelte'
   import type { PreferencesStore } from './lib/preferences'
@@ -79,7 +80,11 @@
   {:else}
     <main class="setup-page">
       {#if current.phase === 'setup'}
-        <Welcome core={loaded.core} onCreated={created} />
+        <Welcome core={loaded.core} onCreated={created}>
+          {#snippet restore()}
+            <RestoreBackup core={loaded!.core} onPhase={setPhase} />
+          {/snippet}
+        </Welcome>
       {:else if current.phase === 'pending_recovery_key'}
         <RecoveryKeyShown
           core={loaded.core}

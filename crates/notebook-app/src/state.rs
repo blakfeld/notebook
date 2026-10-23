@@ -47,20 +47,24 @@ const COLLAPSED_TAGS_KEY: &str = "sidebar.collapsedTags";
 pub struct AppConfig {
     /// Where the vault database lives (`app_data_dir()` in the app).
     pub data_dir: PathBuf,
+    /// Run automatic backups in the background while open. Off in tests,
+    /// which drive [`AppState::backup_tick`] with their own clock.
+    pub backup_schedule: bool,
 }
 
 /// The app state, shared by every command. Cheap to clone.
 #[derive(Clone)]
-pub struct AppState(Arc<Core>);
+pub struct AppState(pub(crate) Arc<Core>);
 
-struct Core {
-    config: AppConfig,
+pub(crate) struct Core {
+    pub(crate) config: AppConfig,
     creds: Arc<dyn CredentialStore>,
     /// Cleared the first time the OS store turns out to be unusable.
     secure_store: AtomicBool,
-    emitter: Arc<dyn Emitter>,
+    pub(crate) emitter: Arc<dyn Emitter>,
     phase: Mutex<Phase>,
-    ops: tokio::sync::Mutex<()>,
+    pub(crate) ops: tokio::sync::Mutex<()>,
+    pub(crate) backups: crate::backup::Backups,
     next_generation: AtomicU64,
     /// Editor session numbers, never reused within a run, so a stale editor
     /// can't reach another note.
@@ -88,7 +92,9 @@ pub(crate) struct Pending {
 pub(crate) struct OpenVault {
     /// Distinguishes this opening from later ones, so host tasks of an old
     /// vault never touch a new one.
-    generation: u64,
+    pub(crate) generation: u64,
+    /// For building backups off the replica lock.
+    pub(crate) vault_key: VaultKey,
     pub(crate) workspace: Workspace<SqliteStorage>,
     /// Editor sessions by the id the frontend knows them by.
     pub(crate) editors: crate::editor::Editors,
@@ -108,12 +114,25 @@ fn new_vault_id() -> AppResult<VaultId> {
     Ok(VaultId::from_parts(time, u128::from_be_bytes(random)))
 }
 
-fn wrong_phase() -> AppError {
+/// A recovery key as typed; one that fails its checksum is
+/// `recovery_key_malformed`.
+pub(crate) fn parse_recovery_key(typed: &str) -> AppResult<RecoveryKey> {
+    RecoveryKey::parse(typed).map_err(|_| {
+        AppError::new(
+            Code::RecoveryKeyMalformed,
+            "the recovery key looks mistyped",
+        )
+    })
+}
+
+pub(crate) fn wrong_phase() -> AppError {
     AppError::new(Code::NotOpen, "not possible at this point")
 }
 
-/// Runs Argon2id work off the async threads.
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> AppResult<T> {
+/// Runs slow work (Argon2id, backup files) off the async threads.
+pub(crate) async fn blocking<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> AppResult<T> {
     tauri::async_runtime::spawn_blocking(f)
         .await
         .map_err(AppError::internal)
@@ -133,6 +152,7 @@ impl AppState {
             emitter,
             phase: Mutex::new(Phase::Setup),
             ops: tokio::sync::Mutex::new(()),
+            backups: Default::default(),
             next_generation: AtomicU64::new(0),
             next_editor: AtomicU64::new(0),
         }));
@@ -222,12 +242,7 @@ impl AppState {
     /// `recovery_key_malformed`; one that doesn't open this notebook is
     /// `recovery_key_wrong`.
     pub async fn open_with_recovery_key(&self, recovery_key: &str) -> AppResult<PhaseDto> {
-        let recovery = RecoveryKey::parse(recovery_key).map_err(|_| {
-            AppError::new(
-                Code::RecoveryKeyMalformed,
-                "the recovery key looks mistyped",
-            )
-        })?;
+        let recovery = parse_recovery_key(recovery_key)?;
         let _ops = self.0.ops.lock().await;
         if !matches!(*self.lock_phase(), Phase::NeedsRecoveryKey) {
             return Err(wrong_phase());
@@ -383,16 +398,16 @@ impl AppState {
     }
 }
 
-fn copy_key(key: &VaultKey) -> VaultKey {
+pub(crate) fn copy_key(key: &VaultKey) -> VaultKey {
     VaultKey::from_secret_bytes(&*key.to_secret_bytes()).expect("a vault key is 32 bytes")
 }
 
 impl Core {
-    fn lock_phase(&self) -> MutexGuard<'_, Phase> {
+    pub(crate) fn lock_phase(&self) -> MutexGuard<'_, Phase> {
         self.phase.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn db_path(&self) -> PathBuf {
+    pub(crate) fn db_path(&self) -> PathBuf {
         vault::database_path(&self.config.data_dir)
     }
 
@@ -412,7 +427,7 @@ impl Core {
         }
     }
 
-    fn emit_phase(&self) {
+    pub(crate) fn emit_phase(&self) {
         events::emit(&*self.emitter, events::APP_PHASE_CHANGED, &self.phase_dto());
     }
 
@@ -427,7 +442,7 @@ impl Core {
 
     /// Stores the vault key in the OS store. Without one, it is simply not
     /// stored (never written to a file), and that is not an error.
-    fn remember(&self, vault: VaultId, key: &VaultKey) -> AppResult<()> {
+    pub(crate) fn remember(&self, vault: VaultId, key: &VaultKey) -> AppResult<()> {
         let result = credentials::save_vault_key(&*self.creds, vault, key);
         self.note_store(&result);
         match result {
@@ -546,16 +561,26 @@ impl Core {
     }
 
     /// Opens the replica and workspace over `storage`, starts the host task
-    /// that forwards changes, and switches to open.
-    fn open_vault(self: &Arc<Self>, storage: SqliteStorage, key: VaultKey) -> AppResult<()> {
+    /// that forwards changes and the backup scheduler, and switches to open.
+    pub(crate) fn open_vault(
+        self: &Arc<Self>,
+        storage: SqliteStorage,
+        key: VaultKey,
+    ) -> AppResult<()> {
+        let vault_key = copy_key(&key);
         let (workspace, changes) = vault::open(storage, key)?;
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+        self.backups.opened();
         *self.lock_phase() = Phase::Open(Box::new(OpenVault {
             generation,
+            vault_key,
             workspace,
             editors: Default::default(),
         }));
         self.spawn_changes(generation, changes);
+        if self.config.backup_schedule {
+            crate::backup::spawn_scheduler(Arc::downgrade(self), generation);
+        }
         self.emit_phase();
         Ok(())
     }
@@ -582,6 +607,7 @@ impl Core {
         if open.generation != generation {
             return;
         }
+        self.backups.changed(open);
         events::emit(
             &*self.emitter,
             events::VAULT_CHANGED,

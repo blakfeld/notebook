@@ -5,7 +5,11 @@
 use tauri::State;
 use zeroize::Zeroizing;
 
-use crate::dto::{ExportResultDto, ListEntryDto, PhaseDto, SelectionDto, SettingsDto, TagNodeDto};
+use crate::backup::Pickers;
+use crate::dto::{
+    BackupStatusDto, ExportResultDto, Interval, ListEntryDto, PhaseDto, PickedBackupDto,
+    SelectionDto, SettingsDto, TagNodeDto,
+};
 use crate::editor::OpenedDto;
 use crate::error::AppError;
 use crate::export::Picker;
@@ -165,4 +169,67 @@ pub async fn set_tag_expanded(
     expanded: bool,
 ) -> Result<()> {
     state.set_tag_expanded(&path, expanded)
+}
+
+// ---- backup ----
+
+#[tauri::command]
+pub async fn backup_status(state: State<'_, AppState>) -> Result<BackupStatusDto> {
+    state.backup_status()
+}
+
+/// Opens the system folder picker and backs up into the chosen folder.
+/// `null` when the user cancels.
+#[tauri::command]
+pub async fn choose_backup_folder(
+    state: State<'_, AppState>,
+    pickers: State<'_, Pickers>,
+) -> Result<Option<BackupStatusDto>> {
+    state.choose_backup_folder(&*pickers.0).await
+}
+
+#[tauri::command]
+pub async fn set_backup_options(
+    state: State<'_, AppState>,
+    auto: bool,
+    interval: Interval,
+    keep: usize,
+) -> Result<BackupStatusDto> {
+    state.set_backup_options(auto, interval, keep)
+}
+
+#[tauri::command]
+pub async fn backup_now(state: State<'_, AppState>) -> Result<BackupStatusDto> {
+    state.backup_now().await
+}
+
+/// Opens the system file picker and reads the chosen backup's header.
+/// `null` when the user cancels.
+#[tauri::command]
+pub async fn pick_backup(
+    state: State<'_, AppState>,
+    pickers: State<'_, Pickers>,
+) -> Result<Option<PickedBackupDto>> {
+    state.pick_backup(&*pickers.0).await
+}
+
+#[tauri::command]
+pub async fn cancel_restore(state: State<'_, AppState>) -> Result<()> {
+    state.cancel_restore();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_backup(
+    state: State<'_, AppState>,
+    recovery_key: Option<String>,
+    skip_safety_backup: bool,
+) -> Result<PhaseDto> {
+    let recovery_key = recovery_key.map(Zeroizing::new);
+    state
+        .restore_backup(
+            recovery_key.as_deref().map(String::as_str),
+            skip_safety_backup,
+        )
+        .await
 }

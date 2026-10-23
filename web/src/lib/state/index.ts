@@ -1,11 +1,13 @@
 import { getContext, setContext } from 'svelte'
 import type { CoreApi } from '../../platform'
 import type { PreferencesStore } from '../preferences'
+import { BackupState } from './backup.svelte'
 import { NotesState } from './notes.svelte'
 import { PhaseState } from './phase.svelte'
 import { SelectionState } from './selection.svelte'
 import { SettingsState } from './settings.svelte'
 
+export { BackupState } from './backup.svelte'
 export { NotesState, SEARCH_DEBOUNCE_MS } from './notes.svelte'
 export { PhaseState } from './phase.svelte'
 export { SelectionState, sameSelection, selectedTag } from './selection.svelte'
@@ -21,6 +23,7 @@ export interface Vault {
   selection: SelectionState
   notes: NotesState
   settings: SettingsState
+  backup: BackupState
   /** Theme and editor view preferences; these outlive the vault. */
   preferences: PreferencesStore
   /** The mounted editor, set by the editor pane, for flushing edits. */
@@ -39,6 +42,7 @@ export function createVault(
     selection,
     notes: new NotesState(core, selection),
     settings: new SettingsState(core),
+    backup: new BackupState(core),
     preferences,
     editor: null,
   }
@@ -59,11 +63,16 @@ export async function flushEditor(vault: Vault): Promise<boolean> {
 
 /** Subscribes and loads everything. */
 export async function startVault(vault: Vault): Promise<void> {
-  await Promise.all([vault.notes.start(), vault.settings.load()])
+  await Promise.all([
+    vault.notes.start(),
+    vault.settings.load(),
+    vault.backup.start(),
+  ])
 }
 
 export function stopVault(vault: Vault): void {
   vault.notes.stop()
+  vault.backup.stop()
 }
 
 const VAULT = Symbol('vault')

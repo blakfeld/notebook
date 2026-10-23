@@ -4,8 +4,13 @@ import { getCM } from '@replit/codemirror-vim'
 import { flushSync } from 'svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import '../../editor/testing'
-import { FakeCoreApi, type SeedNote } from '../../platform/fake'
+import {
+  FakeCoreApi,
+  type FakeBackupFile,
+  type SeedNote,
+} from '../../platform/fake'
 import { coreSettings } from '../../platform/settings'
+import { dayTime } from '../format'
 import { createPreferences } from '../preferences'
 import { PhaseState } from '../state'
 import {
@@ -539,7 +544,7 @@ describe('pending edits are delivered first', () => {
 })
 
 describe('sidebar footer', () => {
-  it('keeps the status slot beside Settings, empty for now', async () => {
+  it('keeps the status slot beside Settings, empty while backups are fine', async () => {
     const { root } = await shell()
     const footer = root.querySelector<HTMLElement>('.sidebar footer')!
     expect(footer.querySelector('.status')!.textContent).toBe('')
@@ -574,7 +579,7 @@ describe('Settings', () => {
     const tabs = [...dialog.querySelectorAll('[role="tab"]')].map((t) =>
       t.textContent!.trim(),
     )
-    expect(tabs).toEqual(['Appearance', 'Editor', 'Export', 'About'])
+    expect(tabs).toEqual(['Appearance', 'Editor', 'Backup', 'Export', 'About'])
     for (const text of seen) {
       expect(text).not.toMatch(
         /server|account|passphrase|lock|sign[- ]?out|sign[- ]?in|sync/i,
@@ -750,5 +755,394 @@ describe('Export', () => {
       methods.indexOf('exportNotes'),
     )
     expect(core.body('a')).toBe('BA')
+  })
+})
+
+describe('Backup settings', () => {
+  const FOLDER = '/Users/alice/Dropbox/Notebook'
+  const HOUR = 3_600_000
+
+  async function openBackup(
+    notes: SeedNote[] = [{ id: 'a', body: '# Current' }],
+    setup?: (core: FakeCoreApi) => void,
+  ) {
+    const opened = await shell(notes, setup)
+    click(button(opened.root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'Backup'))
+    return { ...opened, dialog }
+  }
+
+  /** A folder is set and the last backup was `ago` milliseconds back. */
+  const backedUp =
+    (ago: number, changes: Partial<FakeCoreApi['backup']> = {}) =>
+    (core: FakeCoreApi) =>
+      Object.assign(core.backup, {
+        folder: FOLDER,
+        last: Date.now() - ago,
+        changed: true,
+        ...changes,
+      })
+
+  const statusText = (dialog: HTMLElement) =>
+    dialog
+      .querySelector('[data-testid="backup-status"]')
+      ?.textContent?.replace(/\s+/g, ' ')
+      .trim()
+
+  it('No folder yet: offers to choose one, and Back up now is unavailable', async () => {
+    const { core, dialog } = await openBackup()
+    expect(hasButton(dialog, 'Choose folder…')).toBe(true)
+    expect(button(dialog, 'Back up now').disabled).toBe(true)
+    expect(dialog.querySelector('[data-testid="backup-status"]')).toBeNull()
+    expect(field(dialog, 'Back up automatically').disabled).toBe(true)
+    expect(dialog.textContent!.replace(/\s+/g, ' ')).toMatch(
+      /Backups are encrypted\. To open one on another computer, you need your recovery key\./,
+    )
+
+    click(button(dialog, 'Choose folder…'))
+    await settle()
+    // The first folder gets a backup at once.
+    expect(core.backupsWritten).toHaveLength(1)
+    expect(
+      dialog.querySelector('[data-testid="backup-folder"]')!.textContent,
+    ).toBe(FOLDER)
+    expect(hasButton(dialog, 'Change folder…')).toBe(true)
+    expect(button(dialog, 'Back up now').disabled).toBe(false)
+    expect(statusText(dialog)).toMatch(/Last backup Today at/)
+    expect(statusText(dialog)).toMatch(/Next backup After your next change/)
+  })
+
+  it('changes nothing when the folder picker is dismissed', async () => {
+    const { core, dialog } = await openBackup()
+    core.backupFolderChoice = null
+    click(button(dialog, 'Choose folder…'))
+    await settle()
+    expect(core.callsTo('chooseBackupFolder')).toHaveLength(1)
+    expect(hasButton(dialog, 'Choose folder…')).toBe(true)
+    expect(alerts(dialog)).toEqual([])
+    expect(core.backupsWritten).toEqual([])
+  })
+
+  it('Status shown: the last backup time and when the next is due', async () => {
+    const ago = 2 * HOUR
+    const { core, dialog } = await openBackup(undefined, backedUp(ago))
+    const last = core.backup.last!
+    expect(statusText(dialog)).toBe(
+      `Last backup ${dayTime(last)} Next backup ${dayTime(last + 24 * HOUR)}`,
+    )
+    expect(dialog.querySelector('[data-testid="backup-error"]')).toBeNull()
+  })
+
+  it('says the next backup waits for a change, or that auto is off', async () => {
+    const { core, dialog } = await openBackup(
+      undefined,
+      backedUp(HOUR, { changed: false }),
+    )
+    expect(statusText(dialog)).toMatch(/Next backup After your next change/)
+    check(field(dialog, 'Back up automatically'), false)
+    await settle()
+    expect(core.callsTo('setBackupOptions')).toEqual([
+      [{ auto: false, interval: 'daily', keep: 14 }],
+    ])
+    expect(statusText(dialog)).toMatch(/Next backup Automatic backups are off/)
+  })
+
+  it('saves the interval and how many to keep', async () => {
+    const { core, dialog } = await openBackup(undefined, backedUp(HOUR))
+    const select = dialog.querySelector('select')!
+    select.value = 'weekly'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle()
+    const keep = field(dialog, 'Backups to keep')
+    keep.value = '30'
+    keep.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle()
+    // Not a count: put back, not saved.
+    keep.value = '0'
+    keep.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle()
+    expect(core.callsTo('setBackupOptions')).toEqual([
+      [{ auto: true, interval: 'weekly', keep: 14 }],
+      [{ auto: true, interval: 'weekly', keep: 30 }],
+    ])
+    expect(keep.value).toBe('30')
+    expect(core.backup.keep).toBe(30)
+  })
+
+  it('backs up now, delivering the editor’s edits first', async () => {
+    const { core, root, dialog } = await openBackup(
+      [{ id: 'a', body: 'A' }],
+      backedUp(HOUR),
+    )
+    click(button(dialog, 'Close settings'))
+    click(entry(root, 'a'))
+    await vi.waitFor(() =>
+      expect(editorView(root).state.doc.toString()).toBe('A'),
+    )
+    typeInEditor(root, 'B')
+    click(button(root, 'Settings'))
+    await settle()
+    const reopened = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(reopened, 'Backup'))
+    click(button(reopened, 'Back up now'))
+    await settle()
+    expect(core.backupsWritten).toEqual([
+      [expect.objectContaining({ id: 'a', body: 'BA' })],
+    ])
+    expect(statusText(reopened)).toMatch(/Next backup After your next change/)
+  })
+
+  it('shows why the last backup failed', async () => {
+    const { core, dialog } = await openBackup(undefined, backedUp(HOUR))
+    core.backupWriteError = 'the backup folder is unavailable'
+    click(button(dialog, 'Back up now'))
+    await settle()
+    expect(
+      dialog.querySelector('[data-testid="backup-error"]')!.textContent!.trim(),
+    ).toBe('The last backup failed. The backup folder is unavailable.')
+    expect(button(dialog, 'Back up now').disabled).toBe(false)
+  })
+
+  it('follows status changes from the core', async () => {
+    const { core, dialog } = await openBackup(undefined, backedUp(HOUR))
+    core.emit('backup-status-changed', {
+      ...core.backup,
+      running: true,
+    })
+    flushSync()
+    expect(button(dialog, 'Backing up…').disabled).toBe(true)
+  })
+})
+
+describe('Restore from settings', () => {
+  const FOLDER = '/Users/alice/Dropbox/Notebook'
+  const OLDER = {
+    file_name: 'notebook-backup-20261001-090000.nbbackup',
+    same_vault: true,
+    notes: [{ id: 'old', body: '# From the backup' }],
+  }
+
+  async function openRestore(
+    folder: string | null = FOLDER,
+    backupFile: FakeBackupFile = OLDER,
+  ) {
+    const opened = await shell([{ id: 'a', body: '# Current' }], (core) => {
+      core.backup.folder = folder
+      core.backupFile = backupFile
+    })
+    click(button(opened.root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'Backup'))
+    click(button(dialog, 'Restore from backup…'))
+    await settle()
+    return { ...opened, dialog }
+  }
+
+  const dialogOpen = () => document.querySelector('[role="dialog"]') !== null
+
+  it('Safety backup first: backs up the current notes, then replaces them', async () => {
+    const { core, root, dialog } = await openRestore()
+    expect(dialog.textContent).toMatch(/Replace your notes\?/)
+    expect(dialog.textContent).toMatch(
+      /A backup of your current notes is written to your backup folder first/,
+    )
+    expect(core.callsTo('restoreBackup')).toEqual([])
+
+    click(button(dialog, 'Replace notes'))
+    await settle()
+    expect(core.callsTo('restoreBackup')).toEqual([
+      [{ recoveryKey: null, skipSafetyBackup: false }],
+    ])
+    expect(core.backupsWritten).toEqual([
+      [expect.objectContaining({ id: 'a', body: '# Current' })],
+    ])
+    expect(dialogOpen()).toBe(false)
+    expect(titles(root)).toEqual(['From the backup'])
+  })
+
+  it('Cancelled confirmation: no backup is written and the notes are unchanged', async () => {
+    const { core, root, dialog } = await openRestore()
+    click(button(dialog, 'Cancel'))
+    await settle()
+    expect(core.callsTo('restoreBackup')).toEqual([])
+    // The pick is forgotten, so it can't be restored without a new one.
+    expect(core.callsTo('cancelRestore')).toHaveLength(1)
+    expect(core.backupsWritten).toEqual([])
+    expect(core.has('a')).toBe(true)
+    expect(hasButton(dialog, 'Restore from backup…')).toBe(true)
+    click(button(dialog, 'Close settings'))
+    expect(titles(root)).toEqual(['Current'])
+  })
+
+  it('asks again when the safety backup fails, then restores without one', async () => {
+    const { core, root, dialog } = await openRestore()
+    core.backupWriteError = 'the backup folder is unavailable'
+    click(button(dialog, 'Replace notes'))
+    await settle()
+    expect(alerts(dialog)).toEqual([
+      'Your current notes couldn’t be backed up first, so nothing was replaced. The backup folder is unavailable.',
+    ])
+    expect(core.has('a')).toBe(true)
+    expect(core.has('old')).toBe(false)
+
+    click(button(dialog, 'Replace without a backup'))
+    await settle()
+    expect(core.callsTo('restoreBackup')).toEqual([
+      [{ recoveryKey: null, skipSafetyBackup: false }],
+      [{ recoveryKey: null, skipSafetyBackup: true }],
+    ])
+    expect(core.backupsWritten).toEqual([])
+    expect(titles(root)).toEqual(['From the backup'])
+  })
+
+  it('cancelling the second confirmation keeps the notes', async () => {
+    const { core, dialog } = await openRestore()
+    core.backupWriteError = 'disk full'
+    click(button(dialog, 'Replace notes'))
+    await settle()
+    click(button(dialog, 'Cancel'))
+    await settle()
+    expect(core.callsTo('restoreBackup')).toHaveLength(1)
+    expect(core.has('a')).toBe(true)
+  })
+
+  it('says no safety backup is made without a folder', async () => {
+    const { dialog } = await openRestore(null)
+    expect(dialog.textContent).toMatch(
+      /aren’t backed up first, since no backup folder is set/,
+    )
+  })
+
+  it('asks for the recovery key of another notebook’s backup', async () => {
+    const { core, root, dialog } = await openRestore(FOLDER, {
+      ...OLDER,
+      same_vault: false,
+    })
+    expect(hasButton(dialog, 'Replace notes')).toBe(false)
+    fill(field(dialog, 'Recovery key'), 'ABCD')
+    click(button(dialog, 'Continue'))
+    click(button(dialog, 'Replace notes'))
+    await settle()
+    // Mistyped: back to the key, nothing replaced.
+    expect(alerts(dialog)).toEqual([
+      'That recovery key looks mistyped. Check each group and try again.',
+    ])
+    expect(core.backupsWritten).toEqual([])
+    expect(core.has('a')).toBe(true)
+
+    fill(field(dialog, 'Recovery key'), core.recoveryKey)
+    click(button(dialog, 'Continue'))
+    click(button(dialog, 'Replace notes'))
+    await settle()
+    expect(core.callsTo('restoreBackup').at(-1)).toEqual([
+      { recoveryKey: core.recoveryKey, skipSafetyBackup: false },
+    ])
+    expect(titles(root)).toEqual(['From the backup'])
+  })
+
+  it('shows nothing when the file picker is dismissed', async () => {
+    const opened = await shell([{ id: 'a', body: '# Current' }])
+    click(button(opened.root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'Backup'))
+    click(button(dialog, 'Restore from backup…'))
+    await settle()
+    expect(opened.core.callsTo('pickBackup')).toHaveLength(1)
+    expect(alerts(dialog)).toEqual([])
+    expect(hasButton(dialog, 'Replace notes')).toBe(false)
+  })
+
+  it('closes the open note, whose notebook was replaced', async () => {
+    const { core, root } = await shell([{ id: 'a', body: 'A' }], (core) => {
+      core.backupFile = OLDER
+    })
+    click(entry(root, 'a'))
+    await vi.waitFor(() =>
+      expect(editorView(root).state.doc.toString()).toBe('A'),
+    )
+    typeInEditor(root, 'B')
+    click(button(root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'Backup'))
+    click(button(dialog, 'Restore from backup…'))
+    await settle()
+    click(button(dialog, 'Replace notes'))
+    await settle()
+    const methods = core.calls.map((c) => c.method)
+    expect(methods.lastIndexOf('editorPush')).toBeLessThan(
+      methods.indexOf('restoreBackup'),
+    )
+    expect(root.querySelector('.editor')!.hasAttribute('hidden')).toBe(true)
+    expect(titles(root)).toEqual(['From the backup'])
+  })
+})
+
+describe('backup notice', () => {
+  const FOLDER = '/Users/alice/Dropbox/Notebook'
+  const footer = (root: HTMLElement) =>
+    root.querySelector<HTMLElement>('.sidebar footer')!
+
+  it('Dropbox folder gone: says backups are failing and opens Backup settings', async () => {
+    const { core, root } = await shell([], (core) => {
+      Object.assign(core.backup, { folder: FOLDER, last: Date.now() })
+    })
+    expect(hasButton(footer(root), 'Backups are failing')).toBe(false)
+    // An automatic backup fails: the folder is gone.
+    core.emit('backup-status-changed', {
+      ...core.backup,
+      last_error: 'the backup folder is unavailable',
+      failing: true,
+    })
+    flushSync()
+    click(button(footer(root), 'Backups are failing'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    expect(
+      dialog.querySelector('[role="tab"][aria-selected="true"]')!.textContent,
+    ).toMatch('Backup')
+    expect(
+      dialog.querySelector('[data-testid="backup-error"]')!.textContent!.trim(),
+    ).toBe('The last backup failed. The backup folder is unavailable.')
+  })
+
+  it('says when backups are overdue', async () => {
+    const { root } = await shell([], (core) => {
+      Object.assign(core.backup, {
+        folder: FOLDER,
+        last: Date.now() - 3 * 86_400_000,
+        changed: true,
+      })
+    })
+    expect(hasButton(footer(root), 'Backup overdue')).toBe(true)
+  })
+
+  it('Healthy: no notice', async () => {
+    const { core, root } = await shell([], (core) => {
+      Object.assign(core.backup, { folder: FOLDER, last: Date.now() })
+    })
+    expect(footer(root).querySelector('.status')!.textContent!.trim()).toBe('')
+    // Recovering clears it.
+    core.emit('backup-status-changed', { ...core.backup, failing: true })
+    flushSync()
+    expect(hasButton(footer(root), 'Backups are failing')).toBe(true)
+    core.emit('backup-status-changed', { ...core.backup, failing: false })
+    flushSync()
+    expect(footer(root).querySelector('.status')!.textContent!.trim()).toBe('')
+  })
+
+  it('shows nothing before a folder is chosen', async () => {
+    const { core, root } = await shell()
+    core.emit('backup-status-changed', {
+      ...core.backup,
+      failing: true,
+      overdue: true,
+    })
+    flushSync()
+    expect(footer(root).querySelector('.status')!.textContent!.trim()).toBe('')
   })
 })

@@ -15,7 +15,7 @@
   import ConfirmDialog from './ConfirmDialog.svelte'
   import EditorPane from './EditorPane.svelte'
   import NoteList from './NoteList.svelte'
-  import Settings from './Settings.svelte'
+  import Settings, { type SettingsSection } from './Settings.svelte'
   import Sidebar from './Sidebar.svelte'
 
   interface Props {
@@ -33,7 +33,9 @@
   const actions = new NoteActions(vault)
   const bridge = untrack(() => coreBridge(core))
 
-  let settingsOpen = $state(false)
+  /** The section Settings opened at, while it is open. */
+  let settingsSection = $state<SettingsSection | null>(null)
+  let settingsOpen = $derived(settingsSection !== null)
   let noteList = $state<ReturnType<typeof NoteList>>()
 
   onMount(() => {
@@ -81,14 +83,19 @@
     </div>
   {/if}
   <div class="panes">
-    <Sidebar onOpenSettings={() => (settingsOpen = true)} />
+    <Sidebar
+      onOpenSettings={(section = 'editor') => (settingsSection = section)}
+    />
     <NoteList {actions} bind:this={noteList} />
     <EditorPane {bridge} {actions} />
   </div>
 </div>
 
-{#if settingsOpen}
-  <Settings onClose={() => (settingsOpen = false)} />
+{#if settingsSection}
+  <Settings
+    initialSection={settingsSection}
+    onClose={() => (settingsSection = null)}
+  />
 {/if}
 
 {#if actions.confirming}

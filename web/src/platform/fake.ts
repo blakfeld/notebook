@@ -2,6 +2,9 @@ import * as Y from 'yjs'
 import { fromBase64, toBase64 } from './base64'
 import type { CoreApi, Subscription } from './core'
 import type {
+  BackupInterval,
+  BackupOptions,
+  BackupStatus,
   CoreError,
   CoreEvents,
   ErrorCode,
@@ -9,6 +12,7 @@ import type {
   ListEntry,
   Phase,
   PhaseName,
+  PickedBackup,
   Selection,
   Settings,
   ThemePreference,
@@ -26,6 +30,10 @@ import type {
  * `needs_recovery_key` (opened with `recoveryKey`) and the upgrade's
  * `needs_old_passphrase` (opened with `oldPassphrase`, or `startOver`).
  * Tests set `phase` to start anywhere.
+ *
+ * Backups are kept as note snapshots in `backupsWritten`; the backup file
+ * the picker returns is `backupFile`, opened with `recoveryKey` unless it is
+ * `same_vault`.
  *
  * Tests drive it directly: seed notes, set `phase`, queue failures with
  * `failNext`, `emit` events, and read `calls`.
@@ -56,6 +64,28 @@ export class FakeCoreApi implements CoreApi {
   exportCancelled = false
   /** Where `exportNotes` says the export went. */
   exportPath = '/Users/alice/Backups/notebook-export-20261021-140305'
+  /** The backup settings and status, as `backupStatus` returns them. */
+  backup: BackupStatus = {
+    folder: null,
+    auto: true,
+    interval: 'daily',
+    keep: 14,
+    last: null,
+    next_due: null,
+    changed: false,
+    last_error: null,
+    failing: false,
+    overdue: false,
+    running: false,
+  }
+  /** What the folder picker returns; `null` acts as if it was dismissed. */
+  backupFolderChoice: string | null = '/Users/alice/Dropbox/Notebook'
+  /** What the backup file picker returns; `null` acts as if dismissed. */
+  backupFile: FakeBackupFile | null = null
+  /** The notes of every backup written, oldest first. */
+  readonly backupsWritten: SeedNote[][] = []
+  /** While set, writing a backup fails with this reason. */
+  backupWriteError: string | null = null
   /** Delays every call by this many milliseconds (0 for none). */
   latency = 0
   /**
@@ -72,6 +102,7 @@ export class FakeCoreApi implements CoreApi {
   private listeners = new Map<string, Set<(payload: never) => void>>()
   private sessions = new Map<number, { note: string; doc: Y.Doc }>()
   private nextSession = 1
+  private pickedBackup: FakeBackupFile | null = null
 
   constructor(notes: SeedNote[] = []) {
     for (const note of notes) this.seed(note)
@@ -304,6 +335,96 @@ export class FakeCoreApi implements CoreApi {
       return { count, path: this.exportPath }
     })
 
+  backupStatus = () =>
+    this.call('backupStatus', [], () => {
+      this.requireOpen()
+      return this.backupSnapshot()
+    })
+
+  chooseBackupFolder = () =>
+    this.call('chooseBackupFolder', [], (): BackupStatus | null => {
+      this.requireOpen()
+      if (this.backupFolderChoice === null) return null
+      const first = this.backup.folder === null
+      this.backup.folder = this.backupFolderChoice
+      // As on the host, the first folder gets a backup at once, and keeps
+      // being the folder if that fails.
+      if (first) this.tryBackup()
+      return this.backupChanged()
+    })
+
+  setBackupOptions = (options: BackupOptions) =>
+    this.call('setBackupOptions', [options], () => {
+      this.requireOpen()
+      if (!Number.isInteger(options.keep) || options.keep < 1) {
+        throw fail('internal')
+      }
+      Object.assign(this.backup, options)
+      return this.backupChanged()
+    })
+
+  backupNow = () =>
+    this.call('backupNow', [], () => {
+      this.requireOpen()
+      if (this.backup.folder === null) throw fail('backup_no_folder')
+      const error = this.tryBackup()
+      this.backupChanged()
+      if (error) throw { code: 'backup_failed', message: error }
+      return this.backupSnapshot()
+    })
+
+  pickBackup = () =>
+    this.call('pickBackup', [], (): PickedBackup | null => {
+      const phase = this.phase.phase
+      if (phase !== 'open' && phase !== 'setup') throw fail('not_open')
+      if (this.backupFile === null) return null
+      this.pickedBackup = this.backupFile
+      const { file_name, same_vault } = this.backupFile
+      return { file_name, same_vault }
+    })
+
+  cancelRestore = () =>
+    this.call('cancelRestore', [], () => {
+      this.pickedBackup = null
+    })
+
+  restoreBackup = (args: {
+    recoveryKey: string | null
+    skipSafetyBackup: boolean
+  }) =>
+    this.call('restoreBackup', [args], () => {
+      const picked = this.pickedBackup
+      const phase = this.phase.phase
+      if (!picked || (phase !== 'open' && phase !== 'setup')) {
+        throw fail('not_open')
+      }
+      if (!picked.same_vault) {
+        if (args.recoveryKey === null) throw fail('recovery_key_required')
+        // The key's form is checked before the backup is opened.
+        const typed = normalizeKey(args.recoveryKey)
+        if (typed === null) throw fail('recovery_key_malformed')
+        if (typed !== normalizeKey(this.recoveryKey)) {
+          throw fail('recovery_key_wrong')
+        }
+      }
+      if (
+        phase === 'open' &&
+        this.backup.folder !== null &&
+        !args.skipSafetyBackup
+      ) {
+        const error = this.tryBackup()
+        if (error) {
+          this.backupChanged()
+          throw { code: 'safety_backup_failed', message: error }
+        }
+      }
+      this.notes.clear()
+      this.sessions.clear()
+      for (const note of picked.notes) this.seed(note)
+      this.pickedBackup = null
+      return this.setPhase('open')
+    })
+
   editorOpen = (noteId: string) =>
     this.call('editorOpen', [noteId], () => {
       this.requireOpen()
@@ -420,6 +541,55 @@ export class FakeCoreApi implements CoreApi {
     return this.phase
   }
 
+  /**
+   * Writes a backup of the notes into `backupsWritten`, or records why it
+   * couldn't. Returns the failure, if any.
+   */
+  private tryBackup(): string | null {
+    if (this.backupWriteError !== null) {
+      this.backup.last_error = this.backupWriteError
+      return this.backupWriteError
+    }
+    this.backupsWritten.push(
+      [...this.notes].map(([id, note]) => ({
+        id,
+        body: bodyOf(note),
+        pinned: note.pinned,
+        archived: note.archived,
+        trashed: note.trashed,
+        updated: note.updated,
+      })),
+    )
+    this.backup.last = Date.now()
+    this.backup.changed = false
+    this.backup.last_error = null
+    return null
+  }
+
+  /** The status with its derived fields filled in. */
+  private backupSnapshot(): BackupStatus {
+    const status = this.backup
+    const set = status.folder !== null
+    const scheduled = set && status.auto && status.last !== null
+    const interval = INTERVAL_MS[status.interval]
+    status.next_due = scheduled ? status.last! + interval : null
+    status.failing = set && status.last_error !== null
+    status.overdue =
+      set &&
+      status.auto &&
+      status.changed &&
+      status.last !== null &&
+      Date.now() - status.last > 2 * interval
+    return { ...status }
+  }
+
+  /** Emits `backup-status-changed` and returns the status. */
+  private backupChanged(): BackupStatus {
+    const status = this.backupSnapshot()
+    this.emit('backup-status-changed', { ...status })
+    return status
+  }
+
   private async call<T>(
     method: string,
     args: unknown[],
@@ -447,6 +617,7 @@ export class FakeCoreApi implements CoreApi {
   }
 
   private changed(ids: string[]): void {
+    if (ids.length > 0) this.backup.changed = true
     this.emit('vault-changed', { changed: ids, tree_changed: true })
   }
 
@@ -506,6 +677,20 @@ export interface SeedNote {
   archived?: boolean
   trashed?: boolean
   updated?: number
+}
+
+/** A backup file the fake's picker returns. */
+export interface FakeBackupFile {
+  file_name: string
+  /** A backup of this notebook; otherwise it opens with `recoveryKey`. */
+  same_vault: boolean
+  notes: SeedNote[]
+}
+
+const INTERVAL_MS: Record<BackupInterval, number> = {
+  hourly: 3_600_000,
+  daily: 86_400_000,
+  weekly: 604_800_000,
 }
 
 interface FakeNote {

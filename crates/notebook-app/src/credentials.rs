@@ -146,6 +146,9 @@ pub struct MemoryStore {
     pub unavailable: bool,
     /// Accept this many more writes, then fail like `unavailable` (tests).
     writes_left: Mutex<Option<usize>>,
+    /// While set, writes fail with an error other than a missing store,
+    /// as a keychain that refuses one write (tests).
+    pub broken: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(test)]
@@ -196,6 +199,9 @@ impl CredentialStore for MemoryStore {
     fn set(&self, entry: Entry, value: &[u8]) -> Result<(), CredentialError> {
         if self.failing() {
             return Err(CredentialError::NoSecureStore);
+        }
+        if self.broken.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(CredentialError::Other("write refused".into()));
         }
         if let Some(left) = &mut *self.writes_left.lock().unwrap_or_else(|e| e.into_inner()) {
             *left -= 1;

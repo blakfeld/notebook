@@ -42,6 +42,7 @@ impl Install {
         AppState::launch(
             AppConfig {
                 data_dir: self.dir.path().to_owned(),
+                backup_schedule: false,
             },
             self.creds.clone(),
             self.events.clone(),
@@ -573,6 +574,7 @@ async fn a_keychain_denied_at_launch_changes_nothing() {
     let denied = AppState::launch(
         AppConfig {
             data_dir: install.dir.path().to_owned(),
+            backup_schedule: false,
         },
         Arc::new(MemoryStore::unavailable()),
         install.events.clone(),

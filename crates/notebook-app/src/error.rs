@@ -31,6 +31,21 @@ pub enum Code {
     NotFound,
     /// Writing an export failed. The message says why and is shown.
     ExportFailed,
+    /// Writing a backup failed. The message says why and is shown.
+    BackupFailed,
+    /// No backup folder has been chosen.
+    BackupNoFolder,
+    /// The chosen file isn't a Notebook backup.
+    BackupNotABackup,
+    /// The backup needs a newer version of Notebook.
+    BackupTooNew,
+    /// The backup is truncated or altered.
+    BackupDamaged,
+    /// The backup is of another notebook, so its recovery key is needed.
+    RecoveryKeyRequired,
+    /// The backup of the current notes before a restore failed; nothing
+    /// changed. The message says why and is shown.
+    SafetyBackupFailed,
     Internal,
 }
 

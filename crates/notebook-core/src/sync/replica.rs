@@ -8,6 +8,7 @@ use std::fmt;
 use futures::channel::mpsc;
 use zeroize::Zeroizing;
 
+use crate::backup::BackupNote;
 use crate::crypto::{CryptoError, NoteKey, VaultId, VaultKey, fill_random};
 use crate::document::{
     DocumentError, EditorSync, EditorUpdate, EncryptedSnapshot, EncryptedUpdate, NoteDocument,
@@ -455,6 +456,24 @@ impl<S: Storage> Replica<S> {
         self.store()
     }
 
+    /// Every readable note as a backup holds it: its wrapped key and a
+    /// snapshot of its current state, in ID order. Notes with no readable
+    /// state (see [`notes`](Self::notes)) are left out, since a backup
+    /// can only restore notes that load.
+    pub fn backup_notes(&self) -> Result<Vec<BackupNote>, ReplicaError> {
+        self.notes
+            .iter()
+            .filter(|(_, open)| open.doc.note().is_some())
+            .map(|(id, open)| {
+                Ok(BackupNote {
+                    id: *id,
+                    wrapped_key: open.wrapped_key.clone(),
+                    snapshot: open.doc.snapshot()?,
+                })
+            })
+            .collect()
+    }
+
     /// For bookkeeping that doesn't touch note data: acknowledgments and key
     /// upload marks.
     pub(crate) fn storage_mut(&mut self) -> Result<&mut S, StorageError> {
@@ -777,6 +796,32 @@ mod tests {
     fn reopen(r: &Replica<MemoryStorage>) -> Replica<MemoryStorage> {
         let [key] = vault_keys(vault());
         Replica::open(r.storage().unwrap().clone(), key).unwrap()
+    }
+
+    /// Backup notes import into an empty store and reopen as the same notes.
+    #[test]
+    fn backup_notes_import_as_the_same_notes() {
+        let (mut a, _) = pair();
+        let first = a.create_note("first", T1).unwrap();
+        let second = a.create_note("second", T1).unwrap();
+        a.set_body(second, "second, edited", T2).unwrap();
+        a.set_trashed(first, true).unwrap();
+
+        let notes = a.backup_notes().unwrap();
+        assert_eq!(
+            notes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            [first.min(second), first.max(second)]
+        );
+        let mut store = MemoryStorage::new(vault());
+        for note in &notes {
+            store
+                .import_note(note.id, &note.wrapped_key, note.snapshot.as_bytes())
+                .unwrap();
+        }
+        let [key] = vault_keys(vault());
+        let restored = Replica::open(store, key).unwrap();
+        assert_eq!(restored.notes(), a.notes());
+        assert!(restored.note(first).unwrap().is_trashed());
     }
 
     #[test]

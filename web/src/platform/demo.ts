@@ -27,5 +27,15 @@ export function demoCore(): FakeCoreApi {
       message: 'export isn’t available in the browser yet',
     } satisfies CoreError
   }
+  // Backups need the desktop app's folder and file pickers.
+  const unavailable = async (): Promise<never> => {
+    throw {
+      code: 'backup_failed',
+      message: 'backups aren’t available in the browser',
+    } satisfies CoreError
+  }
+  core.chooseBackupFolder = unavailable
+  core.backupNow = unavailable
+  core.pickBackup = unavailable
   return core
 }

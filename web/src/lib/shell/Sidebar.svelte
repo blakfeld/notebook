@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { View } from '../../platform'
   import { useVault } from '../state'
+  import BackupNotice from './BackupNotice.svelte'
+  import type { SettingsSection } from './Settings.svelte'
   import TagTree from './TagTree.svelte'
   import { TagRenamer } from './tagRename.svelte'
 
   interface Props {
-    onOpenSettings: () => void
+    /** Opens Settings, at `section` if given. */
+    onOpenSettings: (section?: SettingsSection) => void
   }
 
   let { onOpenSettings }: Props = $props()
@@ -72,14 +75,15 @@
     {/if}
   </nav>
   <footer>
-    <!-- The status slot: `vault-backup` shows the backup status here. -->
-    <div class="status"></div>
+    <div class="status">
+      <BackupNotice onOpen={() => onOpenSettings('backup')} />
+    </div>
     <button
       type="button"
       class="plain settings"
       aria-label="Settings"
       title="Settings"
-      onclick={onOpenSettings}
+      onclick={() => onOpenSettings()}
     >
       <span aria-hidden="true">⚙</span>
     </button>

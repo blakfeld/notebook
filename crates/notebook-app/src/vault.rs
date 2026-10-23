@@ -44,18 +44,28 @@ pub fn open(
 /// `None` when there was nothing to move. On failure the files already
 /// moved are moved back. The store must not be open.
 pub fn set_aside(path: &Path, stamp: i64) -> AppResult<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
+    let target = with_suffix(path, &format!(".legacy-{stamp}"));
+    Ok(move_database(path, &target)?.then_some(target))
+}
+
+/// `path` with `suffix` appended to its file name.
+pub fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Renames the database at `from` (with its companion files) to `to`.
+/// Returns false when there was nothing to move. On failure the files
+/// already moved are moved back. Neither store may be open, and nothing may
+/// be at `to`.
+pub fn move_database(from: &Path, to: &Path) -> AppResult<bool> {
+    if !from.exists() {
+        return Ok(false);
     }
-    let with = |base: &Path, suffix: &str| {
-        let mut name = base.as_os_str().to_owned();
-        name.push(suffix);
-        PathBuf::from(name)
-    };
-    let target = with(path, &format!(".legacy-{stamp}"));
     let mut moved = Vec::new();
     for suffix in COMPANIONS {
-        let (from, to) = (with(path, suffix), with(&target, suffix));
+        let (from, to) = (with_suffix(from, suffix), with_suffix(to, suffix));
         match std::fs::rename(&from, &to) {
             Ok(()) => moved.push((from, to)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -67,7 +77,7 @@ pub fn set_aside(path: &Path, stamp: i64) -> AppResult<Option<PathBuf>> {
             }
         }
     }
-    Ok(Some(target))
+    Ok(true)
 }
 
 #[cfg(test)]

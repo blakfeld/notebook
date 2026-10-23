@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { displayTitle, relativeTime, shortcutOf } from './format'
+import { dayTime, displayTitle, relativeTime, shortcutOf } from './format'
 
 describe('relativeTime', () => {
   const now = new Date(2026, 9, 22, 15, 0).getTime()
@@ -16,6 +16,23 @@ describe('relativeTime', () => {
 
   it('falls back to a date', () => {
     expect(relativeTime(new Date(2026, 0, 3).getTime(), now)).toMatch(/3/)
+  })
+})
+
+describe('dayTime', () => {
+  const now = new Date(2026, 9, 22, 15, 0).getTime()
+  const at = (day: number, hour: number) =>
+    new Date(2026, 9, day, hour, 5).getTime()
+
+  it('names the day for yesterday, today, and tomorrow', () => {
+    expect(dayTime(at(22, 9), now)).toMatch(/^Today at 9:05/)
+    expect(dayTime(at(21, 23), now)).toMatch(/^Yesterday at 11:05/)
+    expect(dayTime(at(23, 1), now)).toMatch(/^Tomorrow at 1:05/)
+  })
+
+  it('gives the date further out', () => {
+    expect(dayTime(at(29, 9), now)).toMatch(/29.* at 9:05/)
+    expect(dayTime(new Date(2025, 0, 3, 9, 5).getTime(), now)).toMatch(/2025/)
   })
 })
 

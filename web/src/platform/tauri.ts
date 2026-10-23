@@ -45,6 +45,16 @@ export function tauriCore(): CoreApi {
     renameTag: (old, renamed) => call('rename_tag', { old, new: renamed }),
     exportNotes: (args) => call('export_notes', args),
 
+    backupStatus: () => call('backup_status'),
+    chooseBackupFolder: () => call('choose_backup_folder'),
+    setBackupOptions: ({ auto, interval, keep }) =>
+      call('set_backup_options', { auto, interval, keep }),
+    backupNow: () => call('backup_now'),
+    pickBackup: () => call('pick_backup'),
+    cancelRestore: () => call('cancel_restore'),
+    restoreBackup: ({ recoveryKey, skipSafetyBackup }) =>
+      call('restore_backup', { recoveryKey, skipSafetyBackup }),
+
     editorOpen: (note) => call('editor_open', { note }),
     editorPush: (session, update) => call('editor_push', { session, update }),
     editorClose: (session) => call('editor_close', { session }),

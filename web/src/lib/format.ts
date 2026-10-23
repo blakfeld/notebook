@@ -24,6 +24,35 @@ export function relativeTime(updated: number, now = Date.now()): string {
   })
 }
 
+/**
+ * A time near `now`, past or future, with its day: "Today at 2:03 PM",
+ * "Yesterday at …", "Tomorrow at …", then the date and time.
+ */
+export function dayTime(time: number, now = Date.now()): string {
+  const then = new Date(time)
+  const clock = then.toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  })
+  const days = Math.round((startOfDay(then) - startOfDay(new Date(now))) / DAY)
+  if (days === 0) return `Today at ${clock}`
+  if (days === -1) return `Yesterday at ${clock}`
+  if (days === 1) return `Tomorrow at ${clock}`
+  const date = then.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    year:
+      then.getFullYear() === new Date(now).getFullYear()
+        ? undefined
+        : 'numeric',
+  })
+  return `${date} at ${clock}`
+}
+
+function startOfDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+}
+
 /** The title a list entry shows. */
 export function displayTitle(title: string): string {
   return title.trim() === '' ? 'Untitled' : title
