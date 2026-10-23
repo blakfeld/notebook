@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use futures::channel::mpsc;
 use notebook_core::crypto::{VaultId, VaultKey};
-use notebook_core::sync::{Replica, Shared};
+use notebook_core::replica::{Replica, Shared};
 use notebook_core::workspace::{Changed, Workspace};
 use notebook_storage_sqlite::SqliteStorage;
 
@@ -36,7 +36,7 @@ pub fn open(
     vault_key: VaultKey,
 ) -> AppResult<(Workspace<SqliteStorage>, mpsc::UnboundedReceiver<Changed>)> {
     let replica = Shared::new(Replica::open(storage, vault_key)?);
-    Ok(Workspace::open_local(replica))
+    Ok(Workspace::open(replica))
 }
 
 /// Moves the database at `path` (with its companion files) aside to
@@ -82,7 +82,7 @@ pub fn move_database(from: &Path, to: &Path) -> AppResult<bool> {
 
 #[cfg(test)]
 mod tests {
-    use notebook_core::sync::{Replica, Shared};
+    use notebook_core::replica::{Replica, Shared};
 
     use super::*;
     use crate::state::now;

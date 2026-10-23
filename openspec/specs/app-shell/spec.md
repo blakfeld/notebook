@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Defines the Notebook client application experience shared by desktop, browser, and mobile: account and unlock flows, the sidebar tag tree and special views, the note list, note and tag operations, local search, sync status, and settings.
+Defines the Notebook desktop application experience: setup, unlock, and upgrade flows, the sidebar tag tree and special views, the note list, note and tag operations, local search, and settings.
 
 ## Requirements
 

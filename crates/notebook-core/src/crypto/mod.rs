@@ -2,16 +2,15 @@
 //!
 //! # Key hierarchy
 //!
-//! - Each account has one random [`VaultKey`].
+//! - Each vault has one random [`VaultKey`].
 //! - Each note has its own random [`NoteKey`], stored only wrapped by the
 //!   vault key ([`VaultKey::wrap_note_key`]). Note payloads, CRDT updates,
 //!   and snapshots are encrypted with the note key ([`NoteKey::encrypt`]).
-//! - The vault key is stored on the server in a [`KeyBundle`], wrapped twice:
-//!   once under a key derived from an [`AuthSecret`] (the OPAQUE export key,
-//!   or a passphrase via [`derive_auth_secret`]) and once under a key derived
-//!   from the [`RecoveryKey`]. Either one alone unlocks the vault.
-//! - A local vault keeps a [`RecoveryEntry`] instead: the same recovery wrap
-//!   on its own, stored beside the vault and inside its backups.
+//! - The vault key is kept in the OS keychain, and in a [`RecoveryEntry`]:
+//!   wrapped under a key derived from the [`RecoveryKey`], stored beside the
+//!   vault and inside its backups.
+//! - [`LocalUnlock`] wraps the vault key under a passphrase. Only installs
+//!   from the server-backed version have one, and only to upgrade them.
 //!
 //! # Ciphertext envelope
 //!
@@ -34,7 +33,6 @@
 //! (`crypto.getRandomValues` in the browser). Key material is zeroized on drop
 //! and never appears in `Debug` output.
 
-mod bundle;
 mod envelope;
 mod kdf;
 mod keys;
@@ -48,13 +46,11 @@ use std::str::FromStr;
 
 use ulid::Ulid;
 
-pub use bundle::KeyBundle;
 pub use envelope::{ALGORITHM_XCHACHA20POLY1305, ENVELOPE_OVERHEAD, ENVELOPE_VERSION};
-pub(crate) use kdf::stretch;
 pub use kdf::{KdfVersion, Salt, derive_auth_secret};
 pub use keys::{NoteKey, PayloadKind, VaultKey};
 pub use local_unlock::LocalUnlock;
-pub use recovery::{RECOVERY_VERIFIER_LEN, RecoveryKey};
+pub use recovery::RecoveryKey;
 pub use recovery_entry::RecoveryEntry;
 pub use secret::{AuthSecret, MIN_AUTH_SECRET_LEN};
 
@@ -70,7 +66,7 @@ pub enum CryptoError {
     UnsupportedVersion(u8),
     /// The ciphertext uses an algorithm this build doesn't know.
     UnsupportedAlgorithm(u8),
-    /// The bytes are too short or otherwise not a ciphertext or key bundle.
+    /// The bytes are too short or otherwise not a ciphertext or wrapped key.
     Malformed,
     /// An auth secret shorter than [`MIN_AUTH_SECRET_LEN`] bytes.
     SecretTooShort,
@@ -89,7 +85,7 @@ impl fmt::Display for CryptoError {
             Self::Decrypt => f.write_str("decryption failed"),
             Self::UnsupportedVersion(v) => write!(f, "unsupported ciphertext version {v}"),
             Self::UnsupportedAlgorithm(a) => write!(f, "unsupported ciphertext algorithm {a}"),
-            Self::Malformed => f.write_str("malformed ciphertext or key bundle"),
+            Self::Malformed => f.write_str("malformed ciphertext or wrapped key"),
             Self::SecretTooShort => write!(
                 f,
                 "auth secret must be at least {MIN_AUTH_SECRET_LEN} bytes"
@@ -104,7 +100,7 @@ impl fmt::Display for CryptoError {
 impl std::error::Error for CryptoError {}
 
 /// Identifier of a vault: a ULID the client chooses when the vault is created,
-/// so the key bundle can be bound to it before anything reaches the server.
+/// so the recovery entry and every ciphertext can be bound to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VaultId(Ulid);
 
@@ -231,7 +227,10 @@ mod tests {
                 CryptoError::UnsupportedAlgorithm(9),
                 "unsupported ciphertext algorithm 9",
             ),
-            (CryptoError::Malformed, "malformed ciphertext or key bundle"),
+            (
+                CryptoError::Malformed,
+                "malformed ciphertext or wrapped key",
+            ),
             (
                 CryptoError::SecretTooShort,
                 "auth secret must be at least 32 bytes",

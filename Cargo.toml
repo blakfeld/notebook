@@ -24,45 +24,23 @@ opt-level = 3
 
 [workspace.dependencies]
 notebook-core = { path = "crates/notebook-core" }
-notebook-server = { path = "crates/notebook-server" }
 notebook-storage-sqlite = { path = "crates/notebook-storage-sqlite" }
 
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "zeroize"] }
-axum = "0.8.9"
 base64 = "0.22.1"
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc", "zeroize"] }
-clap = { version = "4.6.7", features = ["derive", "env"] }
-dashmap = "6.2.1"
 dissimilar = "1.0.11"
 futures = { version = "0.3.34", default-features = false, features = ["std", "async-await"] }
-futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 getrandom = "0.4.3"
-gloo-net = { version = "0.7.0", default-features = false, features = ["http", "websocket"] }
-gloo-timers = { version = "0.4.0", features = ["futures"] }
-governor = "0.10.4"
 hkdf = "0.13.0"
-js-sys = "0.3.106"
 # OS credential stores. The default `v1` feature is macOS Keychain, Windows
 # Credential Manager, and the pure-Rust Secret Service client on Linux.
 keyring = "4.2.0"
-http-body-util = "0.1.5"
-# Pinned exactly: a version bump can change stored OPAQUE records and the wire
-# format (see the recorded-transcript test in notebook-core's auth module).
-opaque-ke = { version = "=4.0.1", default-features = false, features = ["ristretto255"] }
-# opaque-ke's RNG traits (rand 0.8 generation), bridged to getrandom 0.4.
-rand_core = { version = "0.6.4", default-features = false }
 pulldown-cmark = { version = "0.13.4", default-features = false }
-# rusqlite and sqlx must link the same libsqlite3-sys (0.37), since Cargo allows
-# one `links = "sqlite3"` crate per workspace. Bump them together.
-reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
-rpassword = "7.4.0"
 rusqlite = { version = "0.39.0", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = { version = "0.11.1", default-features = false }
-# The SHA-512 that opaque-ke's key exchange is generic over (digest 0.10 traits).
-sha2_010 = { package = "sha2", version = "0.10.9", default-features = false }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tauri = { version = "2.12.4", features = [] }
 tauri-build = { version = "2.7.3", features = [] }
 # The folder picker for export runs on the Rust side; no JS dialog permission.
@@ -70,10 +48,6 @@ tauri-plugin-dialog = "2.8.3"
 tauri-plugin-opener = "2.5.3"
 tempfile = "3.27.0"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros"] }
-tokio-tungstenite = "0.29.0"
-toml = "1.1.8"
-tower = { version = "0.5.3", features = ["util"] }
-tower-http = { version = "0.6.11", features = ["fs", "limit", "timeout", "trace", "set-header"] }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 unicode-normalization = "0.1.25"

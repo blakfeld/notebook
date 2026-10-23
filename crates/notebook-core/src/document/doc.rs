@@ -231,8 +231,7 @@ impl NoteDocument {
     }
 
     /// The same full state as [`snapshot`](Self::snapshot), encrypted as an
-    /// update, so it can be pushed like any local change (the sync engine
-    /// re-sends every note this way after a server restore).
+    /// update, so it can be stored or applied like any other update.
     pub fn full_update(&self) -> Result<EncryptedUpdate, DocumentError> {
         self.encrypt_update(&self.full_state())
     }

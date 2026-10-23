@@ -55,7 +55,8 @@ offset  size  field
 The envelope key is HKDF-SHA256 with the recovery key's 16 random bytes as
 input key material, the vault ID's 16 bytes as salt, and the info string
 `notebook/v1/kek/recovery`, expanded to 32 bytes. The envelope kind is 33, the
-same wrap a key bundle's recovery entry uses.
+same wrap the server-backed version's key bundle used for its recovery half;
+kind 32 (its other half) stays reserved.
 
 ### Envelopes
 

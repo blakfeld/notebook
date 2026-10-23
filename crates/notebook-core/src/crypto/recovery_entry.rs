@@ -8,12 +8,17 @@
 //! 17      74    envelope (kind 33, the vault key under the recovery key)
 //! ```
 //!
-//! The envelope is the same wrap as a [`KeyBundle`](super::KeyBundle)'s
-//! recovery entry, without the auth entry. It is not secret on its own: it
-//! opens only with the 128-bit recovery key.
+//! The envelope is the same wrap the server-backed version's key bundle
+//! used for its recovery half. It is not secret on its own: it opens only
+//! with the 128-bit recovery key.
 
-use super::bundle::{KIND_VAULT_KEY_RECOVERY, unwrap, wrap};
+use super::envelope::{self, Context};
+use super::keys::SymmetricKey;
 use super::{CryptoError, RecoveryKey, VaultId, VaultKey};
+
+// Envelope kind 32 was the server key bundle's auth wrap of the vault key;
+// it stays reserved so no new payload ever reuses it.
+const KIND_VAULT_KEY_RECOVERY: u8 = 33;
 
 const ENTRY_VERSION: u8 = 1;
 const HEADER_LEN: usize = 1 + 16;
@@ -88,12 +93,41 @@ impl RecoveryEntry {
     }
 }
 
+fn wrap(
+    key: &SymmetricKey,
+    vault: VaultId,
+    kind: u8,
+    vault_key: &VaultKey,
+) -> Result<Vec<u8>, CryptoError> {
+    let ctx = Context {
+        vault,
+        kind,
+        note: None,
+    };
+    envelope::seal(key.as_bytes(), &ctx, vault_key.0.as_bytes())
+}
+
+fn unwrap(
+    key: &SymmetricKey,
+    vault: VaultId,
+    kind: u8,
+    entry: &[u8],
+) -> Result<VaultKey, CryptoError> {
+    let ctx = Context {
+        vault,
+        kind,
+        note: None,
+    };
+    let bytes = envelope::open(key.as_bytes(), &ctx, entry)?;
+    SymmetricKey::from_slice(&bytes).map(VaultKey)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::envelope::{self, Context};
     use crate::crypto::keys::SymmetricKey;
-    use crate::crypto::{AuthSecret, KeyBundle, NoteKey, PayloadKind};
+    use crate::crypto::{NoteKey, PayloadKind};
     use crate::note::NoteId;
 
     struct Fixture {
@@ -216,24 +250,6 @@ mod tests {
             let entry = RecoveryEntry::from_bytes(&bad).unwrap();
             assert!(entry.open(&f.recovery).is_err(), "byte {i}");
         }
-    }
-
-    #[test]
-    fn same_wrap_as_a_key_bundle_recovery_entry() {
-        let f = fixture();
-        let bundle = KeyBundle::create(
-            f.vault,
-            &f.vault_key,
-            &AuthSecret::from_bytes(&[3; 64]).unwrap(),
-            &f.recovery,
-        )
-        .unwrap();
-        let bundle_bytes = bundle.to_bytes();
-        let mut bytes = vec![ENTRY_VERSION];
-        bytes.extend_from_slice(&f.vault.to_bytes());
-        bytes.extend_from_slice(&bundle_bytes[bundle_bytes.len() - ENVELOPE_LEN..]);
-        let entry = RecoveryEntry::from_bytes(&bytes).unwrap();
-        assert_same_vault_key(&f, &entry.open(&f.recovery).unwrap());
     }
 
     /// Pins the byte format: a fixed vault key, recovery key, vault ID, and

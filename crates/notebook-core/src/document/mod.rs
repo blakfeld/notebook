@@ -1,9 +1,9 @@
 //! Per-note CRDT documents.
 //!
-//! Each note is one [`NoteDocument`]: a [Yrs](yrs) document that every
-//! client edits and merges locally, because the server only ever sees
-//! ciphertext. Yrs shares Yjs's update format, so the same bytes can be
-//! applied by `yjs` in the editor.
+//! Each note is one [`NoteDocument`]: a [Yrs](yrs) document, edited in
+//! memory and stored only as encrypted updates and snapshots. Yrs shares
+//! Yjs's update format, so the same bytes can be applied by `yjs` in the
+//! editor.
 //!
 //! # Layout
 //!

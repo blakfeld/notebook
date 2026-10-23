@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use notebook_core::crypto::LocalUnlock;
-use notebook_core::sync::{Replica, Shared};
+use notebook_core::replica::{Replica, Shared};
 use notebook_storage_sqlite::SqliteStorage;
 use serde_json::Value;
 
@@ -339,7 +339,18 @@ struct Legacy {
     vault: VaultId,
     key: VaultKey,
     bodies: Vec<String>,
-    outbox: usize,
+    log_entries: usize,
+}
+
+/// How many updates are stored across every note.
+fn log_entries(replica: &Replica<SqliteStorage>) -> usize {
+    let store = replica.storage().unwrap();
+    store
+        .list_notes()
+        .unwrap()
+        .into_iter()
+        .map(|id| store.load_note(id).unwrap().unwrap().entries.len())
+        .sum()
 }
 
 fn seed_legacy(install: &Install, locked: bool) -> Legacy {
@@ -360,8 +371,8 @@ fn seed_legacy(install: &Install, locked: bool) -> Legacy {
         .iter()
         .map(|n| n.title().to_owned())
         .collect();
-    let outbox = replica.lock().pending().unwrap();
-    assert!(outbox > 0);
+    let log_entries = log_entries(&replica.lock());
+    assert!(log_entries > 0);
     drop(replica);
 
     legacy::save_session(&*install.creds, vault);
@@ -375,7 +386,7 @@ fn seed_legacy(install: &Install, locked: bool) -> Legacy {
         vault,
         key,
         bodies,
-        outbox,
+        log_entries,
     }
 }
 
@@ -409,11 +420,11 @@ async fn signed_in_install_upgrades_with_a_new_recovery_key() {
 
     app.acknowledge_recovery_key().await.unwrap();
     assert_upgraded(&install, &app, &old);
-    // Pending outbox entries are left in place for `retire-sync-server`.
+    // Every stored update is kept.
     app.with_vault(|open| {
         assert_eq!(
-            open.workspace.replica().lock().pending().unwrap(),
-            old.outbox
+            log_entries(&open.workspace.replica().lock()),
+            old.log_entries
         );
         Ok(())
     })

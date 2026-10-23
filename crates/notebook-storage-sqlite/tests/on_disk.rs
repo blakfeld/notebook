@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 
 use notebook_core::crypto::{NoteKey, PayloadKind, VaultId, VaultKey};
 use notebook_core::note::NoteId;
-use notebook_core::storage::{
-    EntryKind, LocalUpdate, RemoteBatch, RemoteEntry, ServerSeq, Storage, StorageError, UpdateId,
-};
+use notebook_core::storage::{LocalUpdate, Storage, StorageError};
 use notebook_storage_sqlite::SqliteStorage;
 use tempfile::TempDir;
 
@@ -20,10 +18,7 @@ fn note(n: u128) -> NoteId {
 }
 
 fn local(n: u8) -> LocalUpdate {
-    LocalUpdate {
-        id: UpdateId([n; 16]),
-        bytes: vec![n; 4],
-    }
+    LocalUpdate { bytes: vec![n; 4] }
 }
 
 fn store_path() -> (TempDir, PathBuf) {
@@ -76,44 +71,19 @@ fn open_for_different_vault() {
     );
     let s = SqliteStorage::open(&path, vault(1)).unwrap();
     assert_eq!(s.load_note(note(1)).unwrap(), stored);
-    assert_eq!(s.outbox().unwrap().len(), 1);
 }
 
 #[test]
-fn clear_keeps_settings_and_releases_vault() {
+fn open_for_another_vault_after_deleting_the_file() {
     let (_dir, path) = store_path();
     let mut s = SqliteStorage::open(&path, vault(1)).unwrap();
     s.create_note(note(1), b"key", local(1)).unwrap();
-    s.append_local(note(1), local(2)).unwrap();
-    s.apply_remote(RemoteBatch {
-        keys: vec![(note(2), b"remote".to_vec())],
-        entries: vec![],
-        cursor: ServerSeq(12),
-    })
-    .unwrap();
-    s.set_setting("editor.vim", "true").unwrap();
-    s.clear().unwrap();
-
-    let s = SqliteStorage::open(&path, vault(1)).unwrap();
-    assert!(s.list_notes().unwrap().is_empty());
-    assert!(s.outbox().unwrap().is_empty());
-    assert!(s.pending_keys().unwrap().is_empty());
-    assert_eq!(s.cursor().unwrap(), ServerSeq(0));
-    assert_eq!(s.setting("editor.vim").unwrap().as_deref(), Some("true"));
-}
-
-#[test]
-fn open_for_another_vault_after_clear() {
-    let (_dir, path) = store_path();
-    let mut s = SqliteStorage::open(&path, vault(1)).unwrap();
-    s.create_note(note(1), b"key", local(1)).unwrap();
-    s.set_setting("editor.vim", "true").unwrap();
-    s.clear().unwrap();
+    drop(s);
+    SqliteStorage::delete_database(&path).unwrap();
 
     let s = SqliteStorage::open(&path, vault(2)).unwrap();
     assert_eq!(s.vault_id(), vault(2));
     assert!(s.list_notes().unwrap().is_empty());
-    assert_eq!(s.setting("editor.vim").unwrap().as_deref(), Some("true"));
     drop(s);
     assert!(matches!(
         SqliteStorage::open(&path, vault(1)),
@@ -204,20 +174,18 @@ fn foreign_sqlite_file_is_corrupt_and_untouched() {
 }
 
 #[test]
-fn pending_update_survives_restart() {
+fn update_survives_restart() {
     let (_dir, path) = store_path();
     let mut s = SqliteStorage::open(&path, vault(1)).unwrap();
     s.create_note(note(1), b"key", local(1)).unwrap();
-    s.acknowledge(UpdateId([1; 16]), ServerSeq(1)).unwrap();
     s.append_local(note(1), local(2)).unwrap();
-    drop(s);
+    // No close: the process ends with the store still open.
+    std::mem::forget(s);
 
     let s = SqliteStorage::open(&path, vault(1)).unwrap();
-    let outbox = s.outbox().unwrap();
-    assert_eq!(outbox.len(), 1);
-    assert_eq!((outbox[0].note, outbox[0].id), (note(1), UpdateId([2; 16])));
     let stored = s.load_note(note(1)).unwrap().unwrap();
-    assert_eq!(stored.entries.last().unwrap().id, Some(UpdateId([2; 16])));
+    let bytes: Vec<_> = stored.entries.iter().map(|e| e.bytes.clone()).collect();
+    assert_eq!(bytes, [local(1).bytes, local(2).bytes]);
 }
 
 #[test]
@@ -237,7 +205,6 @@ fn plaintext_never_reaches_disk() {
         id,
         &wrapped,
         LocalUpdate {
-            id: UpdateId([1; 16]),
             bytes: encrypt(PayloadKind::CrdtUpdate, 1),
         },
     )
@@ -245,23 +212,16 @@ fn plaintext_never_reaches_disk() {
     s.append_local(
         id,
         LocalUpdate {
-            id: UpdateId([2; 16]),
             bytes: encrypt(PayloadKind::CrdtUpdate, 2),
         },
     )
     .unwrap();
-    s.acknowledge(UpdateId([1; 16]), ServerSeq(1)).unwrap();
-    s.apply_remote(RemoteBatch {
-        keys: vec![],
-        entries: vec![RemoteEntry {
-            note: id,
-            kind: EntryKind::Snapshot,
-            id: None,
-            seq: ServerSeq(2),
-            bytes: encrypt(PayloadKind::CrdtSnapshot, 3),
-        }],
-        cursor: ServerSeq(2),
-    })
+    s.append_local(
+        id,
+        LocalUpdate {
+            bytes: encrypt(PayloadKind::CrdtUpdate, 3),
+        },
+    )
     .unwrap();
     let through = s
         .load_note(id)

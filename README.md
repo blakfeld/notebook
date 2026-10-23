@@ -15,7 +15,6 @@ crates/
   notebook-core/        platform-independent library (native + wasm32)
   notebook-storage-sqlite/  the local SQLite store
   notebook-app/         Tauri 2 desktop app around web/
-  notebook-server/      the old sync server, no longer used (removal planned)
 web/                    Svelte 5 + Vite + TypeScript frontend
   src/lib/              components and helpers
   src/platform/         host adapter (Tauri IPC)
@@ -76,6 +75,21 @@ the app was locked. It then shows a new recovery key. Save it: the old
 recovery key no longer opens anything. If the old passphrase is lost, "Start
 over" keeps the old database beside the new one (`vault.sqlite3.legacy-*` in
 the app's data directory) and creates an empty notebook.
+
+A later version also upgrades the notebook's storage in place and drops the
+sync bookkeeping the old version kept. Every note and edit is kept, but take
+a backup (or a markdown export from Settings) before installing it, in case
+something goes wrong.
+
+### Shutting down an old sync server
+
+The server is no longer part of this repository and nothing in the app talks
+to it. Keep it running until every device has upgraded (each one needs its
+notes on the device first) and has been backed up or exported. Then stop the
+service and delete its data directory: it holds only ciphertext that the
+upgraded devices no longer read. The last version of the server's code and
+its deployment guide are in git history (`crates/notebook-server` and
+`docs/deployment.md` before the `retire-sync-server` change).
 
 `notebook-app` embeds `web/dist` at compile time, so build the frontend before
 any `cargo build`, `clippy`, or `test` that includes it:

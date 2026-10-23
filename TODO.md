@@ -66,8 +66,15 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 ## Wave 2
 
-1. [ ] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
-   - Needs: nothing outstanding (`local-only-desktop` and `vault-backup` are archived).
+1. [x] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
+   - Archived as `2026-10-23-retire-sync-server` (PR #19, branch `worktree-virtual-imagining-lightning`). 12 of 13
+     tasks done; code review and security-analyst findings fixed.
+   - Open manual check (7.1): upgrade a copy of a real `local-only-desktop` data directory, confirm every note opens
+     and edits, then edit one note heavily and confirm its log compacts.
+   - Deferred (pre-existing, minor): `SqliteStorage::open` runs migrations before the vault-binding check, so opening
+     a store for the wrong vault still upgrades its layout (data kept).
+   - Merged with the `vault-backup`/`local-only-desktop` archive (PR #20): `Replica::backup_notes` moved to
+     `notebook_core::replica`, and `vault-crypto` keeps the recovery entry and drops the recovery verifier.
 
 > **Milestone: safe local-only app (reached 2026-10-23).** Encrypted backups
 > land in Dropbox (or any synced folder) automatically and restore on a new
@@ -90,9 +97,8 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
     each through different requirements, so they archive in any order.
   - `local-storage` is modified by `vault-backup` (ADDED import) and `retire-sync-server`
     (removals and rewrites), which also don't collide.
-- **After `retire-sync-server` is archived:**
-  - Delete the five empty retired spec directories (`accounts`, `invites`, `server-hosting`, `sync-protocol`, `sync-client`).
-  - Fix the Purpose lines of `app-shell`, `local-storage`, and `vault-crypto`.
+- **After `retire-sync-server` was archived:** done in the archive. The five retired spec directories are deleted,
+  and the Purpose lines of `app-shell`, `local-storage`, and `vault-crypto` are updated.
 
 ## Later / out of scope for now
 

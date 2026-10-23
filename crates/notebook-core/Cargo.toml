@@ -10,12 +10,6 @@ publish.workspace = true
 [features]
 # Exposes `storage::conformance` so storage backends in other crates can run it.
 conformance = []
-# Exposes `sync::fake` (in-memory server and manual timer) to other crates' tests.
-test-util = []
-# The reqwest + tokio-tungstenite transport and tokio timer, for native hosts.
-transport-native = ["dep:reqwest", "dep:tokio", "dep:tokio-tungstenite"]
-# The fetch + browser WebSocket transport and gloo timer, for the browser.
-transport-wasm = ["dep:gloo-net", "dep:gloo-timers", "dep:js-sys"]
 
 [dependencies]
 argon2.workspace = true
@@ -24,20 +18,9 @@ chacha20poly1305.workspace = true
 dissimilar.workspace = true
 futures.workspace = true
 getrandom.workspace = true
-gloo-net = { workspace = true, optional = true }
-gloo-timers = { workspace = true, optional = true }
 hkdf.workspace = true
-js-sys = { workspace = true, optional = true }
-opaque-ke.workspace = true
 pulldown-cmark.workspace = true
-rand_core.workspace = true
-reqwest = { workspace = true, optional = true }
-serde.workspace = true
-serde_json.workspace = true
 sha2.workspace = true
-sha2_010.workspace = true
-tokio = { workspace = true, optional = true, features = ["time"] }
-tokio-tungstenite = { workspace = true, optional = true, features = ["rustls-tls-native-roots"] }
 ulid.workspace = true
 unicode-normalization.workspace = true
 yrs.workspace = true
@@ -46,6 +29,8 @@ zip.workspace = true
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }
+serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

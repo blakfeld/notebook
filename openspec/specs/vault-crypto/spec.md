@@ -1,12 +1,12 @@
 # vault-crypto Specification
 
 ## Purpose
-Defines the end-to-end encryption every Notebook client shares: the vault key hierarchy, per-note keys, the server-stored key bundle, the recovery key, passphrase key derivation, and the versioned authenticated ciphertext envelope.
+Defines the encryption every Notebook client shares: the vault key hierarchy, per-note keys, the recovery key, passphrase key derivation for upgrading legacy installs, and the versioned authenticated ciphertext envelope.
 
 ## Requirements
 
 ### Requirement: Vault identity
-Every vault SHALL have an identifier that is a ULID, chosen by the client when the vault is created so the key bundle can be bound to it before anything reaches the server. Its text form SHALL be the 26-character Crockford base32 ULID encoding, and parsing that text form SHALL yield the same identifier.
+Every vault SHALL have an identifier that is a ULID, chosen by the client when the vault is created so the recovery entry and every ciphertext can be bound to it. Its text form SHALL be the 26-character Crockford base32 ULID encoding, and parsing that text form SHALL yield the same identifier.
 
 #### Scenario: Vault identifier round-trips through text
 - **WHEN** a vault identifier is formatted as text and the text is parsed back
@@ -39,7 +39,7 @@ Note payloads, CRDT updates, and CRDT snapshots SHALL be encrypted with the note
 - **THEN** the marker does not appear in the ciphertext
 
 ### Requirement: Ciphertext bound to its context
-Every ciphertext SHALL be authenticated together with its context: vault ID, note ID, and payload kind. Decrypting under any different context SHALL fail, so a server cannot move a ciphertext to another vault, note, or kind.
+Every ciphertext SHALL be authenticated together with its context: vault ID, note ID, and payload kind. Decrypting under any different context SHALL fail, so ciphertext copied out of a database or backup cannot be moved to another vault, note, or kind.
 
 #### Scenario: Wrong note
 - **WHEN** a ciphertext encrypted for note A is decrypted as belonging to note B with the same key
@@ -97,47 +97,6 @@ Each note key SHALL be stored only wrapped (encrypted) by the vault key, using t
 #### Scenario: Wrong vault key
 - **WHEN** a wrapped note key is unwrapped with a different vault key
 - **THEN** unwrapping fails
-
-### Requirement: Key bundle
-The key bundle SHALL hold the vault ID and the vault key wrapped separately under an auth secret and under the recovery key, and SHALL serialize to bytes the server can store without being able to unwrap. Either secret alone SHALL recover the vault key.
-
-#### Scenario: Unlock with the auth secret
-- **WHEN** a bundle is created for a vault key and unlocked with the same auth secret
-- **THEN** the recovered vault key unwraps note keys the original wrapped
-
-#### Scenario: Unlock with the recovery key
-- **WHEN** a bundle is unlocked with the recovery key it was created with
-- **THEN** the recovered vault key unwraps note keys the original wrapped
-
-#### Scenario: Wrong secret
-- **WHEN** a bundle is unlocked with a different auth secret or a different recovery key
-- **THEN** unlocking fails
-
-#### Scenario: Serialization round trip
-- **WHEN** a bundle is serialized, parsed back, and unlocked
-- **THEN** unlocking succeeds and the parsed bundle reports the same vault ID
-
-#### Scenario: Malformed bundle bytes
-- **WHEN** truncated or garbage bytes are parsed as a key bundle
-- **THEN** parsing fails with an error without panicking
-
-### Requirement: Auth secret input
-An auth secret SHALL be accepted from the auth layer (such as the OPAQUE export key) or from passphrase derivation as at least 32 bytes of high-entropy input. Shorter input SHALL be rejected. The key that wraps the vault key SHALL be derived from the secret and the vault ID, so the same secret yields unrelated wrapping keys for different vaults.
-
-#### Scenario: Short secret rejected
-- **WHEN** an auth secret of fewer than 32 bytes is supplied
-- **THEN** it is rejected with an error
-
-#### Scenario: Bundle bound to its vault
-- **WHEN** the wrapped vault key from a bundle for vault V is placed in a bundle claiming vault W and unlocked with the same secret
-- **THEN** unlocking fails
-
-### Requirement: Rewrapping on passphrase change
-Replacing the auth secret SHALL rewrap only the vault key. The recovery entry, the vault key, note keys, and all note ciphertexts SHALL be unchanged, and the old auth secret SHALL no longer unlock the bundle.
-
-#### Scenario: Passphrase change
-- **WHEN** a bundle's auth entry is rewrapped under a new auth secret
-- **THEN** the new secret and the recovery key unlock the same vault key, and the old secret fails
 
 ### Requirement: Recovery key
 At vault creation the client SHALL generate a recovery key with at least 128 bits of randomness, shown as uppercase Crockford base32 in hyphen-separated groups of four, with an embedded checksum. It SHALL independently unwrap the vault key from the bundle.
@@ -197,25 +156,6 @@ The vault cryptography SHALL build for native targets and for `wasm32-unknown-un
 #### Scenario: Fixed test vector
 - **WHEN** a fixed key, nonce, context, and payload are encrypted through the envelope
 - **THEN** the output matches a recorded byte string, so any target producing different bytes fails the test
-
-### Requirement: Recovery verifier
-A recovery key SHALL deterministically yield a 32-byte recovery verifier that a server can store to check possession of the recovery key. The verifier SHALL be derived with a domain separate from the recovery wrapping key, so knowing it gives no help in unwrapping the vault key, and different recovery keys SHALL yield different verifiers.
-
-#### Scenario: Deterministic verifier
-- **WHEN** the verifier is derived twice from the same recovery key, once from the generated key and once from its re-entered display form
-- **THEN** both verifiers are identical
-
-#### Scenario: Different keys
-- **WHEN** verifiers are derived from two different recovery keys
-- **THEN** they differ
-
-#### Scenario: Verifier does not unlock the bundle
-- **WHEN** the verifier bytes are used as an auth secret to unlock a bundle created with that recovery key
-- **THEN** unlocking fails
-
-#### Scenario: Fixed test vector
-- **WHEN** the verifier is derived from a fixed recovery key
-- **THEN** it matches a recorded byte string, so every target derives the same verifier
 
 ### Requirement: Recovery entry
 A recovery entry SHALL hold the vault ID and the vault key wrapped under the recovery key, bound to that vault ID, with no auth secret. It SHALL serialize to versioned bytes that can be stored beside the vault and inside backups. Only the matching recovery key SHALL unwrap it.
