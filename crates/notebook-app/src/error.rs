@@ -5,42 +5,28 @@
 
 use std::fmt;
 
-use notebook_core::auth::AuthError;
-use notebook_core::auth::api::ErrorCode;
-use notebook_core::auth::http::AuthClientError;
 use notebook_core::storage::StorageError;
-use notebook_core::sync::{ReplicaError, SyncError};
-use notebook_core::workspace::{ServerUrlError, WorkspaceError};
+use notebook_core::sync::ReplicaError;
+use notebook_core::workspace::WorkspaceError;
 use serde::Serialize;
 
 use crate::credentials::CredentialError;
 
-/// The stable error codes. `bad_credentials` is the only code for both an
-/// unknown user and a wrong passphrase.
+/// The stable error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Code {
-    InvalidServerUrl,
-    InvalidUsername,
-    PassphraseTooShort,
-    PassphraseMismatch,
-    BadCredentials,
-    Unreachable,
-    RateLimited,
-    InvalidInvite,
-    UsernameTaken,
-    RecoveryKeyRequired,
+    /// The recovery key fails its checksum: probably mistyped.
     RecoveryKeyMalformed,
+    /// A well-formed recovery key that doesn't open this notebook.
     RecoveryKeyWrong,
+    /// The old passphrase of an upgrading install is wrong.
     WrongPassphrase,
-    /// The session ended; re-enter the passphrase to sign in again.
-    SignInRequired,
-    Offline,
-    PendingChanges,
     InvalidTagName,
     Trashed,
     NotTrashed,
-    Locked,
+    /// The notebook isn't open, or the command doesn't fit the current phase.
+    NotOpen,
     NotFound,
     Internal,
 }
@@ -59,8 +45,8 @@ impl AppError {
         }
     }
 
-    pub fn locked() -> Self {
-        Self::new(Code::Locked, "the vault is locked")
+    pub fn not_open() -> Self {
+        Self::new(Code::NotOpen, "the notebook is not open")
     }
 
     pub fn internal(message: impl fmt::Display) -> Self {
@@ -78,41 +64,6 @@ impl std::error::Error for AppError {}
 
 pub type AppResult<T> = Result<T, AppError>;
 
-impl From<ServerUrlError> for AppError {
-    fn from(err: ServerUrlError) -> Self {
-        Self::new(Code::InvalidServerUrl, err.to_string())
-    }
-}
-
-impl From<AuthClientError> for AppError {
-    fn from(err: AuthClientError) -> Self {
-        let message = err.to_string();
-        let code = match err {
-            AuthClientError::Network | AuthClientError::Server(_) => Code::Unreachable,
-            AuthClientError::RateLimited { .. } => Code::RateLimited,
-            AuthClientError::Rejected(code) => match code {
-                ErrorCode::InvalidCredentials => Code::BadCredentials,
-                ErrorCode::InvalidUsername => Code::InvalidUsername,
-                ErrorCode::UsernameTaken => Code::UsernameTaken,
-                ErrorCode::InvalidInvite => Code::InvalidInvite,
-                ErrorCode::Unavailable => Code::RateLimited,
-                ErrorCode::InvalidToken | ErrorCode::SessionEnded => Code::SignInRequired,
-                ErrorCode::InvalidRequest | ErrorCode::NotFound | ErrorCode::Internal => {
-                    Code::Internal
-                }
-            },
-            AuthClientError::Auth(err) => match err {
-                AuthError::InvalidCredentials => Code::BadCredentials,
-                AuthError::InvalidUsername => Code::InvalidUsername,
-                AuthError::PassphraseTooShort => Code::PassphraseTooShort,
-                AuthError::Protocol => Code::Unreachable,
-                AuthError::Crypto(_) => Code::Internal,
-            },
-        };
-        Self::new(code, message)
-    }
-}
-
 impl From<WorkspaceError> for AppError {
     fn from(err: WorkspaceError) -> Self {
         let message = err.to_string();
@@ -124,8 +75,6 @@ impl From<WorkspaceError> for AppError {
             // A rename that can't be written is still a name the user has
             // to change.
             WorkspaceError::Unrepresentable(_) => Code::InvalidTagName,
-            WorkspaceError::Sync(SyncError::Offline | SyncError::SignInRequired) => Code::Offline,
-            WorkspaceError::Sync(SyncError::RateLimited) => Code::RateLimited,
             WorkspaceError::Replica(ReplicaError::EditorSessionNotFound(_)) => Code::NotFound,
             WorkspaceError::Replica(_) | WorkspaceError::Sync(_) => Code::Internal,
         };
@@ -148,33 +97,27 @@ impl From<StorageError> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use notebook_core::note::NoteId;
 
     #[test]
     fn serializes_with_a_snake_case_code() {
-        let json = serde_json::to_value(AppError::new(Code::BadCredentials, "x")).unwrap();
+        let json = serde_json::to_value(AppError::new(Code::RecoveryKeyWrong, "x")).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"code": "bad_credentials", "message": "x"})
+            serde_json::json!({"code": "recovery_key_wrong", "message": "x"})
         );
     }
 
     #[test]
-    fn unknown_user_and_wrong_passphrase_share_a_code() {
-        let a: AppError = AuthClientError::Auth(AuthError::InvalidCredentials).into();
-        let b: AppError = AuthClientError::Rejected(ErrorCode::InvalidCredentials).into();
-        assert_eq!(a.code, Code::BadCredentials);
-        assert_eq!(b.code, Code::BadCredentials);
-    }
-
-    #[test]
-    fn network_and_rate_limits_are_distinct() {
+    fn workspace_errors_map_to_codes() {
+        let id = NoteId::from_parts(1, 1);
         assert_eq!(
-            AppError::from(AuthClientError::Network).code,
-            Code::Unreachable
+            AppError::from(WorkspaceError::NotTrashed(id)).code,
+            Code::NotTrashed
         );
         assert_eq!(
-            AppError::from(AuthClientError::RateLimited { retry_after: None }).code,
-            Code::RateLimited
+            AppError::from(WorkspaceError::Unrepresentable(id)).code,
+            Code::InvalidTagName
         );
     }
 }

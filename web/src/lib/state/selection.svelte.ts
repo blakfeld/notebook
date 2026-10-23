@@ -2,7 +2,7 @@ import type { Selection } from '../../platform'
 
 /** The sidebar selection and the note open in the editor. */
 export class SelectionState {
-  /** Notes on first unlock. */
+  /** Notes when the notebook opens. */
   current = $state<Selection>({ view: 'notes' })
   /** The open note, or `null` for the empty state. */
   noteId = $state<string | null>(null)

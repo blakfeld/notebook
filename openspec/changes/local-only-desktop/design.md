@@ -88,4 +88,8 @@ A new recovery key is generated because the old one sits only in the server's ke
 
 ## Migration Plan
 
-One-way conversion on first launch of the new version (Decision 5). A rollback build would find no `session` entry and show its sign-in screen, while the local database is still intact for it. No server-side steps: the server is simply no longer used.
+One-way conversion on first launch of the new version (Decision 5). Nothing on disk changes before the user acknowledges the new recovery key. After that, the database is at layout version 2, which an older build refuses to open (`SchemaTooNew`), and the `session` entry is gone. So rolling back means signing in again on the old build, which downloads the vault from the server while it still runs. No server-side steps: the server is simply no longer used.
+
+Launch never moves or deletes anything because a read failed: when the keychain or the database can't be read (a denied keychain prompt, a busy or damaged file), the app shows the recovery-key prompt and tries again at the next launch. A database is moved aside automatically only when the keychain answers that it holds no key for it. Legacy entries are deleted only when an upgrade is acknowledged, never by "Start over", so a passphrase remembered later still opens the moved file. "Start over" is offered from the old-passphrase screen, from the recovery-key prompt, and on an upgrade's recovery-key screen once acknowledging fails (its database is first opened then).
+
+Known limitation: the keychain has one `vault-key` slot. If a notebook is moved aside by "Start over" while its `vault-key` entry is still in the keychain (because the keychain couldn't be read, for example after a denied prompt), creating the new notebook overwrites that entry, and the moved file then opens only with its recovery key.

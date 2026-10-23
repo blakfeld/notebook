@@ -25,18 +25,15 @@ async function call<T>(
 export function tauriCore(): CoreApi {
   return {
     appState: () => call('app_state'),
-    signIn: (server, username, passphrase) =>
-      call('sign_in', { server, username, passphrase }),
-    generateRecoveryKey: () => call('generate_recovery_key'),
-    register: (args) => call('register', args),
-    recover: (args) => call('recover', args),
-    unlock: (passphrase) => call('unlock', { passphrase }),
-    lock: () => call('lock'),
-    reauthenticate: (passphrase) => call('reauthenticate', { passphrase }),
-    changePassphrase: (args) => call('change_passphrase', args),
-    signOut: (confirm) => call('sign_out', { confirm }),
-    pendingCount: () => call('pending_count'),
-    syncStatus: () => call('sync_status'),
+    coreVersion: () => call('core_version'),
+    createNotebook: () => call('create_notebook'),
+    pendingRecoveryKey: () => call('pending_recovery_key'),
+    acknowledgeRecoveryKey: () => call('acknowledge_recovery_key'),
+    openWithRecoveryKey: (recoveryKey) =>
+      call('open_with_recovery_key', { recoveryKey }),
+    upgradeWithPassphrase: (passphrase) =>
+      call('upgrade_with_passphrase', { passphrase }),
+    startOver: () => call('start_over'),
 
     tagTree: () => call('tag_tree'),
     listNotes: (selection, query) => call('list_notes', { selection, query }),

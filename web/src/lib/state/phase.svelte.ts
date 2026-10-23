@@ -1,7 +1,8 @@
 import type { CoreApi, Phase } from '../../platform'
 
 /**
- * Which screen the app shows: signed out, locked, or unlocked. Follows the
+ * Which screen the app shows: setup, one of the recovery-key and upgrade
+ * screens, or the open notebook. Follows the
  * core's `app-phase-changed` events, and command results that return a
  * phase are applied with {@link PhaseState.set} so the UI doesn't wait for
  * the event.

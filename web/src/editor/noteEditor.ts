@@ -512,8 +512,8 @@ export function createNoteEditor(
       editors.delete(view)
       // Leave no note text behind for whatever still references the view
       // (vim's jump list does), and clear vim's module-level registers and
-      // histories, which outlive every editor: after a lock or a sign-out
-      // they would otherwise hold, and paste, the previous note's text.
+      // histories, which outlive every editor: once the editor is gone they
+      // would otherwise hold, and paste, the previous note's text.
       view.setState(stateFor(null))
       view.destroy()
       Vim.resetVimGlobalState_()

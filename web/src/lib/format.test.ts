@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
-import { displayTitle, relativeTime, shortcutOf, syncSummary } from './format'
+import { displayTitle, relativeTime, shortcutOf } from './format'
 
 describe('relativeTime', () => {
   const now = new Date(2026, 9, 22, 15, 0).getTime()
@@ -27,17 +27,6 @@ describe('displayTitle', () => {
   })
 })
 
-describe('syncSummary', () => {
-  it('hides a zero pending count', () => {
-    expect(
-      syncSummary({ state: 'synced', pending: 0, attention: [] }).pending,
-    ).toBeNull()
-    expect(
-      syncSummary({ state: 'offline', pending: 2, attention: [] }).pending,
-    ).toBe('2 pending')
-  })
-})
-
 describe('shortcutOf', () => {
   const key = (init: KeyboardEventInit) => new KeyboardEvent('keydown', init)
 
@@ -47,11 +36,12 @@ describe('shortcutOf', () => {
     expect(shortcutOf(key({ key: 'n', ctrlKey: true }), false)).toBe('new-note')
   })
 
-  it('knows search and lock', () => {
+  it('knows search, and nothing else', () => {
     expect(
       shortcutOf(key({ key: 'F', metaKey: true, shiftKey: true }), true),
     ).toBe('search')
     expect(shortcutOf(key({ key: 'f', metaKey: true }), true)).toBeNull()
-    expect(shortcutOf(key({ key: 'l', metaKey: true }), true)).toBe('lock')
+    // There is no lock any more, so Mod+L is left to the system.
+    expect(shortcutOf(key({ key: 'l', metaKey: true }), true)).toBeNull()
   })
 })

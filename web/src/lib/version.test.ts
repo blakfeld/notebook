@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { formatCoreVersion } from './version'
+import { formatVersion } from './version'
 
-describe('formatCoreVersion', () => {
-  it('shows the core version when the host provides one', () => {
-    expect(formatCoreVersion('0.1.0')).toBe('core v0.1.0')
+describe('formatVersion', () => {
+  it('shows the version the core reports', () => {
+    expect(formatVersion('0.1.0')).toBe('v0.1.0')
   })
 
-  it('falls back to "browser build" without a host', () => {
-    expect(formatCoreVersion(null)).toBe('browser build')
+  it('says when the version couldn’t be read', () => {
+    expect(formatVersion(null)).toBe('Unknown')
   })
 })

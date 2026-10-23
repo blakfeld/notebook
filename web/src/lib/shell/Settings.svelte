@@ -1,8 +1,7 @@
 <script lang="ts">
-  import { errorCode, type Phase } from '../../platform'
-  import { checkNewPassphrase, errorMessage } from '../errors'
-  import { shortcutLabel, syncSummary } from '../format'
-  import { flushEditor, useVault } from '../state'
+  import { onMount } from 'svelte'
+  import { useVault } from '../state'
+  import { formatVersion } from '../version'
   import Modal from './Modal.svelte'
 
   interface Props {
@@ -11,17 +10,16 @@
 
   let { onClose }: Props = $props()
 
-  const vault = useVault()
-  const { core, phase, settings, sync, preferences } = vault
+  const { core, settings, preferences } = useVault()
 
   /**
    * The screen's sections, in order. Other capabilities add theirs here
-   * (Export from `markdown-export`).
+   * (Export from `markdown-export`, Backup from `vault-backup`).
    */
   const SECTIONS = [
-    { id: 'account', label: 'Account' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'editor', label: 'Editor' },
+    { id: 'about', label: 'About' },
   ] as const
 
   const THEMES = [
@@ -31,92 +29,17 @@
   ] as const
   type Section = (typeof SECTIONS)[number]['id']
 
-  let section = $state<Section>('account')
+  let section = $state<Section>('editor')
 
-  let account = $derived(phase.current?.account ?? null)
-  let summary = $derived(syncSummary(sync.status))
+  /** `undefined` while loading, `null` if it couldn't be read. */
+  let version = $state<string | null | undefined>(undefined)
 
-  // ---- change passphrase ----
-  let changing = $state(false)
-  let current = $state('')
-  let next = $state('')
-  let confirm = $state('')
-  let changeError = $state('')
-  let changeDone = $state(false)
-  let changeBusy = $state(false)
-
-  async function changePassphrase(event: SubmitEvent) {
-    event.preventDefault()
-    if (changeBusy) return
-    changeError = ''
-    const problem = checkNewPassphrase(next, confirm)
-    if (problem) {
-      changeError = problem
-      return
-    }
-    changeBusy = true
-    try {
-      await core.changePassphrase({ current, new: next, confirm })
-      current = next = confirm = ''
-      changing = false
-      changeDone = true
-    } catch (error) {
-      const code = errorCode(error)
-      sync.checkError(error)
-      changeError =
-        code === 'offline'
-          ? 'Changing the passphrase needs a connection to the server. Nothing was changed.'
-          : code === 'sign_in_required'
-            ? 'Your session has ended. Sign in again from the prompt above the notes, then try again.'
-            : errorMessage(error)
-    } finally {
-      changeBusy = false
-    }
-  }
-
-  // ---- lock and sign out ----
-  let accountError = $state('')
-  /** Unsynced changes the user is being warned about, or `null`. */
-  let losing = $state<number | null>(null)
-  let busy = $state(false)
-
-  /** Locks or signs out, after delivering the open editor's edits. */
-  async function apply(action: () => Promise<Phase>) {
-    if (busy) return
-    busy = true
-    accountError = ''
-    try {
-      await flushEditor(vault)
-      phase.set(await action())
-    } catch (error) {
-      if (errorCode(error) === 'pending_changes') {
-        losing = await core.pendingCount().catch(() => 1)
-      } else {
-        accountError = errorMessage(error)
-      }
-    } finally {
-      busy = false
-    }
-  }
-
-  async function signOut() {
-    if (busy) return
-    accountError = ''
-    let pending: number
-    try {
-      // Edits still in the editor count too.
-      await flushEditor(vault)
-      pending = await core.pendingCount()
-    } catch (error) {
-      accountError = errorMessage(error)
-      return
-    }
-    if (pending > 0) {
-      losing = pending
-      return
-    }
-    await apply(() => core.signOut(false))
-  }
+  onMount(() => {
+    core.coreVersion().then(
+      (v) => (version = v),
+      () => (version = null),
+    )
+  })
 </script>
 
 <Modal labelledby="settings-title" {onClose}>
@@ -155,144 +78,7 @@
         id="settings-panel-{section}"
         aria-labelledby="settings-tab-{section}"
       >
-        {#if section === 'account'}
-          <dl>
-            <dt>Server</dt>
-            <dd>{account?.server ?? '—'}</dd>
-            <dt>Username</dt>
-            <dd>{account?.username ?? '—'}</dd>
-            <dt>Status</dt>
-            <dd>
-              Signed in · {summary.label}{summary.pending
-                ? ` · ${summary.pending}`
-                : ''}
-              {#each summary.alerts as alert (alert)}
-                <br /><span class="alert">{alert}</span>
-              {/each}
-            </dd>
-            {#if phase.current && !phase.current.credentials_remembered}
-              <dt>This device</dt>
-              <dd>Sign-in isn’t remembered (no secure credential store)</dd>
-            {/if}
-          </dl>
-
-          <div class="group">
-            <h3>Passphrase</h3>
-            {#if changing}
-              <form class="change" onsubmit={changePassphrase}>
-                <label class="field">
-                  Current passphrase
-                  <input
-                    type="password"
-                    autocomplete="current-password"
-                    required
-                    bind:value={current}
-                  />
-                </label>
-                <label class="field">
-                  New passphrase
-                  <input
-                    type="password"
-                    autocomplete="new-password"
-                    required
-                    bind:value={next}
-                  />
-                </label>
-                <label class="field">
-                  New passphrase again
-                  <input
-                    type="password"
-                    autocomplete="new-password"
-                    required
-                    bind:value={confirm}
-                  />
-                </label>
-                {#if changeError}
-                  <p class="form-error" role="alert">{changeError}</p>
-                {/if}
-                <div class="buttons">
-                  <button
-                    type="button"
-                    onclick={() => {
-                      changing = false
-                      changeError = ''
-                      current = next = confirm = ''
-                    }}
-                  >
-                    Cancel
-                  </button>
-                  <button type="submit" class="primary" disabled={changeBusy}>
-                    Change passphrase
-                  </button>
-                </div>
-              </form>
-            {:else}
-              {#if changeDone}
-                <p class="hint" role="status">Passphrase changed.</p>
-              {/if}
-              <button
-                type="button"
-                onclick={() => {
-                  changing = true
-                  changeDone = false
-                }}
-              >
-                Change passphrase…
-              </button>
-            {/if}
-          </div>
-
-          <div class="group">
-            <h3>Session</h3>
-            {#if losing !== null}
-              <div class="warning" role="alert">
-                <p>
-                  {losing === 1
-                    ? '1 change hasn’t synced and will be lost.'
-                    : `${losing} changes haven’t synced and will be lost.`}
-                  Sign out anyway?
-                </p>
-                <div class="buttons">
-                  <button type="button" onclick={() => (losing = null)}>
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    class="danger"
-                    disabled={busy}
-                    onclick={() => apply(() => core.signOut(true))}
-                  >
-                    Sign out and lose changes
-                  </button>
-                </div>
-              </div>
-            {:else}
-              <div class="buttons start">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onclick={() => apply(() => core.lock())}
-                >
-                  Lock <span class="hint">{shortcutLabel('L')}</span>
-                </button>
-                <button
-                  type="button"
-                  class="danger"
-                  disabled={busy}
-                  onclick={signOut}
-                >
-                  Sign out
-                </button>
-              </div>
-              <p class="hint">
-                Signing out removes this device’s copy of your notes.
-              </p>
-            {/if}
-            {#if accountError}
-              <p class="form-error" role="alert">{accountError}</p>
-            {/if}
-          </div>
-        {:else if section === 'appearance'}
+        {#if section === 'appearance'}
           <fieldset class="group" aria-describedby="theme-hint">
             <legend>Theme</legend>
             <div class="choices">
@@ -330,6 +116,13 @@
               Vim keys in the editor. Applies to this device only.
             </p>
           </div>
+        {:else if section === 'about'}
+          <dl>
+            <dt>Notebook</dt>
+            <dd data-testid="app-version">
+              {version === undefined ? '…' : formatVersion(version)}
+            </dd>
+          </dl>
         {/if}
       </div>
     </div>
@@ -400,42 +193,11 @@
     overflow-wrap: anywhere;
   }
 
-  .alert {
-    color: var(--warning);
-  }
-
   .group {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
     align-items: flex-start;
-  }
-
-  h3 {
-    margin: 0;
-    font-size: 0.95rem;
-  }
-
-  .change {
-    display: flex;
-    flex-direction: column;
-    gap: 0.6rem;
-    width: 100%;
-    max-width: 22rem;
-  }
-
-  .buttons {
-    display: flex;
-    gap: 0.5rem;
-    justify-content: flex-end;
-  }
-
-  .buttons.start {
-    justify-content: flex-start;
-  }
-
-  .warning p {
-    margin: 0 0 0.5rem;
   }
 
   fieldset {

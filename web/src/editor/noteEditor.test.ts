@@ -279,7 +279,7 @@ describe('delivery', () => {
     vi.useFakeTimers()
     const { editor, view, bridge, errors } = setup({ a: '' })
     await editor.openNote('a')
-    bridge.pushError = new NoteClosedError('locked')
+    bridge.pushError = new NoteClosedError('not_open')
     type(view, 'one')
     await vi.advanceTimersByTimeAsync(300)
     expect(errors).toEqual([bridge.pushError])

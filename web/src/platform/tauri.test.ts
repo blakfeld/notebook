@@ -16,65 +16,43 @@ describe('tauriCore', () => {
   it('sends commands with the host’s camelCase argument names', async () => {
     invoke.mockResolvedValue(undefined)
     const core = tauriCore()
-    await core.register({
-      server: 's',
-      username: 'u',
-      passphrase: 'p',
-      confirm: 'p',
-      inviteCode: 'i',
-    })
-    await core.recover({
-      server: 's',
-      username: 'u',
-      recoveryKey: 'k',
-      passphrase: 'p',
-      confirm: 'p',
-    })
+    await core.createNotebook()
+    await core.pendingRecoveryKey()
+    await core.acknowledgeRecoveryKey()
+    await core.openWithRecoveryKey('k')
+    await core.upgradeWithPassphrase('p')
+    await core.startOver()
+    await core.coreVersion()
     await core.listNotes({ tag: 'work' }, 'q')
     await core.renameTag('work', 'job')
     await core.editorPush(3, 'AAE=')
     await core.setTagExpanded('work', false)
-    await core.signOut(true)
     expect(invoke.mock.calls).toEqual([
-      [
-        'register',
-        {
-          server: 's',
-          username: 'u',
-          passphrase: 'p',
-          confirm: 'p',
-          inviteCode: 'i',
-        },
-      ],
-      [
-        'recover',
-        {
-          server: 's',
-          username: 'u',
-          recoveryKey: 'k',
-          passphrase: 'p',
-          confirm: 'p',
-        },
-      ],
+      ['create_notebook', undefined],
+      ['pending_recovery_key', undefined],
+      ['acknowledge_recovery_key', undefined],
+      ['open_with_recovery_key', { recoveryKey: 'k' }],
+      ['upgrade_with_passphrase', { passphrase: 'p' }],
+      ['start_over', undefined],
+      ['core_version', undefined],
       ['list_notes', { selection: { tag: 'work' }, query: 'q' }],
       ['rename_tag', { old: 'work', new: 'job' }],
       ['editor_push', { session: 3, update: 'AAE=' }],
       ['set_tag_expanded', { path: 'work', expanded: false }],
-      ['sign_out', { confirm: true }],
     ])
   })
 
   it('passes host errors through and wraps anything else', async () => {
     const core = tauriCore()
-    invoke.mockRejectedValueOnce({ code: 'bad_credentials', message: 'x' })
-    await expect(core.signIn('s', 'u', 'p')).rejects.toEqual({
-      code: 'bad_credentials',
+    invoke.mockRejectedValueOnce({ code: 'recovery_key_wrong', message: 'x' })
+    await expect(core.openWithRecoveryKey('k')).rejects.toEqual({
+      code: 'recovery_key_wrong',
       message: 'x',
     })
-    invoke.mockRejectedValueOnce('command sign_in not found')
-    await expect(core.signIn('s', 'u', 'p')).rejects.toEqual({
+    invoke.mockRejectedValueOnce('command open_with_recovery_key not found')
+    await expect(core.openWithRecoveryKey('k')).rejects.toEqual({
       code: 'internal',
-      message: 'command sign_in not found',
+      message: 'command open_with_recovery_key not found',
     })
   })
 
@@ -107,7 +85,7 @@ describe('tauriCore', () => {
 
   it('rejects `ready` when subscribing fails', async () => {
     listen.mockRejectedValue(new Error('no permission'))
-    const off = tauriCore().on('sync-status', () => {})
+    const off = tauriCore().on('app-phase-changed', () => {})
     await expect(off.ready).rejects.toThrow('no permission')
   })
 })

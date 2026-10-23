@@ -1,5 +1,3 @@
-import type { SyncStatus } from '../platform'
-
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
@@ -31,45 +29,12 @@ export function displayTitle(title: string): string {
   return title.trim() === '' ? 'Untitled' : title
 }
 
-/** What the sync indicator says. */
-export interface SyncSummary {
-  /** "Synced", "Syncing…", or "Offline". */
-  label: string
-  /** "3 pending", or `null` when nothing is pending. */
-  pending: string | null
-  /** Conditions that need the user, most important first. */
-  alerts: string[]
-}
-
-const ATTENTION: Partial<Record<SyncStatus['attention'][number], string>> = {
-  sign_in_required: 'Sign in required to sync',
-  upgrade_required: 'App upgrade required for some notes',
-  quota_full: 'Storage full: changes can’t upload',
-  update_too_large: 'A note is too large to sync',
-  push_blocked: 'Changes can’t upload right now',
-  integrity_warning: 'A change from the server was rejected as damaged',
-}
-
-export function syncSummary(status: SyncStatus | null): SyncSummary {
-  if (!status) return { label: 'Starting…', pending: null, alerts: [] }
-  const label = {
-    synced: 'Synced',
-    syncing: 'Syncing…',
-    offline: 'Offline',
-  }[status.state]
-  return {
-    label,
-    pending: status.pending > 0 ? `${status.pending} pending` : null,
-    alerts: status.attention.flatMap((a) => ATTENTION[a] ?? []),
-  }
-}
-
 /** Mac keyboards use ⌘ where others use Ctrl. */
 export function isMac(): boolean {
   return /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
 }
 
-export type Shortcut = 'new-note' | 'search' | 'lock'
+export type Shortcut = 'new-note' | 'search'
 
 /** The app shortcut a key press means, if any. */
 export function shortcutOf(
@@ -83,7 +48,6 @@ export function shortcutOf(
   const key = event.key.toLowerCase()
   if (key === 'n' && !event.shiftKey) return 'new-note'
   if (key === 'f' && event.shiftKey) return 'search'
-  if (key === 'l' && !event.shiftKey) return 'lock'
   return null
 }
 

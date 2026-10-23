@@ -5,7 +5,6 @@ import type {
   Phase,
   Selection,
   Settings,
-  SyncStatus,
   TagNode,
 } from './types'
 
@@ -16,48 +15,42 @@ import type {
  * `FakeCoreApi`. UI code imports only this interface.
  *
  * Every method rejects with a {@link CoreError} on failure. Passphrases and
- * recovery keys go in and are never returned, except the recovery key
- * `generateRecoveryKey` shows once during registration.
+ * recovery keys go in and are never returned, except the new recovery key,
+ * shown until the user acknowledges it.
  */
 export interface CoreApi {
-  // ---- app and account ----
+  // ---- app and notebook ----
   appState(): Promise<Phase>
-  signIn(server: string, username: string, passphrase: string): Promise<Phase>
+  /** The app's version (the workspace's, shared by core and host). */
+  coreVersion(): Promise<string>
   /**
-   * Generates the recovery key for the next `register` and returns its
-   * display form. The core keeps it; `register` uses it.
+   * Generates a new notebook in memory, moves to `pending_recovery_key`,
+   * and returns the recovery key's display form. Only valid in `setup`.
    */
-  generateRecoveryKey(): Promise<string>
-  register(args: {
-    server: string
-    username: string
-    passphrase: string
-    confirm: string
-    inviteCode: string
-  }): Promise<Phase>
-  recover(args: {
-    server: string
-    username: string
-    recoveryKey: string
-    passphrase: string
-    confirm: string
-  }): Promise<Phase>
-  unlock(passphrase: string): Promise<Phase>
-  lock(): Promise<Phase>
-  /** Signs in again after the session ended, keeping the vault open. */
-  reauthenticate(passphrase: string): Promise<void>
-  changePassphrase(args: {
-    current: string
-    new: string
-    confirm: string
-  }): Promise<void>
+  createNotebook(): Promise<string>
   /**
-   * Signs out and deletes this device's copy of the vault. Fails with
-   * `pending_changes` when changes are unsynced and `confirm` is false.
+   * The recovery key waiting to be acknowledged, for when the screen shows
+   * without one in hand (an upgrade generates it at launch). Only valid in
+   * `pending_recovery_key`.
    */
-  signOut(confirm: boolean): Promise<Phase>
-  pendingCount(): Promise<number>
-  syncStatus(): Promise<SyncStatus>
+  pendingRecoveryKey(): Promise<string>
+  /** The user saved the recovery key: writes the notebook and opens it. */
+  acknowledgeRecoveryKey(): Promise<Phase>
+  /**
+   * Opens the notebook when its key isn't in the secure store. Fails with
+   * `recovery_key_malformed` for a mistyped key and `recovery_key_wrong`
+   * for one that doesn't open this notebook (`internal` if the database
+   * can't be read).
+   */
+  openWithRecoveryKey(recoveryKey: string): Promise<Phase>
+  /** Upgrades a locked server-backed install with its old passphrase. */
+  upgradeWithPassphrase(passphrase: string): Promise<Phase>
+  /**
+   * Gives up on the notebook that can't be opened (in `needs_old_passphrase`
+   * or `needs_recovery_key`): its database is set aside under another name
+   * (not deleted) and the welcome screen shows.
+   */
+  startOver(): Promise<Phase>
 
   // ---- vault ----
   tagTree(): Promise<TagNode[]>
@@ -67,7 +60,7 @@ export interface CoreApi {
   setPinned(id: string, pinned: boolean): Promise<void>
   setArchived(id: string, archived: boolean): Promise<void>
   setTrashed(id: string, trashed: boolean): Promise<void>
-  /** Deletes a trashed note on the server, then here. Needs a connection. */
+  /** Deletes a trashed note from this device. */
   deletePermanently(id: string): Promise<void>
   /** Renames or moves a tag across every note; returns how many changed. */
   renameTag(old: string, renamed: string): Promise<number>

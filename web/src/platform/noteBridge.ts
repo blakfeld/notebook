@@ -5,14 +5,14 @@ import {
 } from '../editor/bridge'
 import { fromBase64, toBase64 } from './base64'
 import type { CoreApi } from './core'
-import { errorCode, type EditorRemoteUpdate } from './types'
+import { errorCode, type EditorRemoteUpdate, type ErrorCode } from './types'
 
 /**
- * Push failures the core will never get over for this session: the vault
- * locked (the session went with it), the note or session is gone, or the
- * note is trashed.
+ * Push failures the core will never get over for this session: the
+ * notebook isn't open (the session went with it), the note or session is
+ * gone, or the note is trashed.
  */
-const FINAL = new Set(['locked', 'not_found', 'trashed'])
+const FINAL = new Set<ErrorCode>(['not_open', 'not_found', 'trashed'])
 
 /**
  * The {@link NoteDocBridge} over the core's editor host commands:

@@ -10,13 +10,9 @@ import {
   stopVault,
 } from '.'
 
-function unlocked(notes: ConstructorParameters<typeof FakeCoreApi>[0] = []) {
+function opened(notes: ConstructorParameters<typeof FakeCoreApi>[0] = []) {
   const core = new FakeCoreApi(notes)
-  core.phase = {
-    phase: 'unlocked',
-    account: { server: 'https://s', username: 'alice' },
-    credentials_remembered: true,
-  }
+  core.phase = { phase: 'open', secure_store: true, upgrade: false }
   const phase = new PhaseState(core)
   const vault = createVault(core, phase, createPreferences(memorySettings()))
   return { core, phase, vault }
@@ -28,7 +24,7 @@ afterEach(() => {
 
 describe('vault state', () => {
   it('starts on Notes with the list and tree loaded', async () => {
-    const { vault } = unlocked([
+    const { vault } = opened([
       { id: 'a', body: '# A\n#work' },
       { id: 'b', body: 'B', archived: true },
     ])
@@ -40,7 +36,7 @@ describe('vault state', () => {
   })
 
   it('re-queries the list and tree on vault-changed', async () => {
-    const { core, vault } = unlocked([{ id: 'a', body: 'A' }])
+    const { core, vault } = opened([{ id: 'a', body: 'A' }])
     await startVault(vault)
     // A change the frontend didn't make, e.g. from another device.
     core.seed({ id: 'b', body: '# B\n#ideas' })
@@ -63,7 +59,7 @@ describe('vault state', () => {
 
   it('debounces the search query', async () => {
     vi.useFakeTimers()
-    const { core, vault } = unlocked([
+    const { core, vault } = opened([
       { id: 'a', body: 'plumber sink' },
       { id: 'b', body: 'plumber' },
     ])
@@ -86,7 +82,7 @@ describe('vault state', () => {
   })
 
   it('re-lists on a selection change, closing the open note', async () => {
-    const { vault } = unlocked([
+    const { vault } = opened([
       { id: 'a', body: 'A' },
       { id: 't', body: 'T', trashed: true },
     ])
@@ -100,21 +96,8 @@ describe('vault state', () => {
     stopVault(vault)
   })
 
-  it('follows sync status events', async () => {
-    const { core, vault } = unlocked()
-    await startVault(vault)
-    expect(vault.sync.status?.state).toBe('synced')
-    core.setSync({ state: 'offline', pending: 2, attention: [] })
-    expect(vault.sync.status).toEqual({
-      state: 'offline',
-      pending: 2,
-      attention: [],
-    })
-    stopVault(vault)
-  })
-
   it('loads and writes settings', async () => {
-    const { core, vault } = unlocked()
+    const { core, vault } = opened()
     core.settings = {
       ...core.settings,
       vim_mode: true,
@@ -137,9 +120,13 @@ describe('PhaseState', () => {
     const core = new FakeCoreApi()
     const phase = new PhaseState(core)
     await phase.start()
-    expect(phase.current?.phase).toBe('signed_out')
-    core.setPhase('locked', { server: 's', username: 'u' })
-    expect(phase.current?.phase).toBe('locked')
+    expect(phase.current?.phase).toBe('setup')
+    core.setPhase('pending_recovery_key', true)
+    expect(phase.current).toEqual({
+      phase: 'pending_recovery_key',
+      secure_store: true,
+      upgrade: true,
+    })
     phase.stop()
     expect(core.listenerCount('app-phase-changed')).toBe(0)
   })

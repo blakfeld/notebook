@@ -9,7 +9,6 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter as _, Runtime};
 
 pub const APP_PHASE_CHANGED: &str = "app-phase-changed";
-pub const SYNC_STATUS: &str = "sync-status";
 pub const VAULT_CHANGED: &str = "vault-changed";
 /// Changes an open editor lacks: `{session, update}` (base64 Yjs update).
 pub const EDITOR_REMOTE_UPDATE: &str = "editor-remote-update";

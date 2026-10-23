@@ -1,41 +1,53 @@
 //! Secrets in the OS credential store, behind a trait with an in-memory
 //! implementation for tests and for systems without a secure store.
 //!
-//! Three entries under one service, each keyed by this install's id:
+//! Entries under one service, each keyed by this install's id:
+//!
+//! | entry | contents | present when |
+//! |---|---|---|
+//! | `vault-key` | the vault id and the vault key | a notebook exists and the OS has a secure store |
+//!
+//! Installs that were signed in to a sync server may still have these,
+//! which are only read (by the upgrade) and then deleted:
 //!
 //! | entry | contents | present when |
 //! |---|---|---|
 //! | `session` | server, username, vault id, session id, refresh token | signed in |
-//! | `local-unlock` | the vault key wrapped under the passphrase, and the key bundle fingerprint | signed in, until a passphrase change elsewhere is noticed |
+//! | `local-unlock` | the vault key wrapped under the passphrase, and the key bundle fingerprint | signed in, unless a passphrase change elsewhere was noticed |
 //! | `auto-unlock` | the vault key | signed in and not locked |
 //!
 //! Nothing here ever falls back to a file.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(test)]
 use std::sync::Mutex;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use notebook_core::auth::api::Token;
 use notebook_core::crypto::{LocalUnlock, VaultId, VaultKey};
-use notebook_core::workspace::ServerUrl;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The keychain service every entry lives under.
 pub const SERVICE: &str = "com.blakfeld.notebook";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Entry {
+    VaultKey,
+    /// Legacy, read and deleted by the upgrade.
     Session,
+    /// Legacy, read and deleted by the upgrade.
     LocalUnlock,
+    /// Legacy, read and deleted by the upgrade.
     AutoUnlock,
 }
 
 impl Entry {
     fn name(self) -> &'static str {
         match self {
+            Self::VaultKey => "vault-key",
             Self::Session => "session",
             Self::LocalUnlock => "local-unlock",
             Self::AutoUnlock => "auto-unlock",
@@ -125,8 +137,8 @@ impl CredentialStore for KeyringStore {
     }
 }
 
-/// Entries in memory only: for tests, and for the rest of a session on a
-/// system with no secure store (so nothing survives a relaunch).
+/// Entries in memory only, for tests.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryStore {
     entries: Mutex<HashMap<Entry, Zeroizing<Vec<u8>>>>,
@@ -136,12 +148,12 @@ pub struct MemoryStore {
     writes_left: Mutex<Option<usize>>,
 }
 
+#[cfg(test)]
 impl MemoryStore {
     pub fn new() -> Self {
         Self::default()
     }
 
-    #[cfg(test)]
     pub fn unavailable() -> Self {
         Self {
             unavailable: true,
@@ -150,8 +162,7 @@ impl MemoryStore {
     }
 
     /// A store that stops working after `writes` writes, as a keychain
-    /// that locks partway through a sign-in.
-    #[cfg(test)]
+    /// that locks partway through.
     pub fn fails_after(writes: usize) -> Self {
         Self {
             writes_left: Mutex::new(Some(writes)),
@@ -173,6 +184,7 @@ impl MemoryStore {
     }
 }
 
+#[cfg(test)]
 impl CredentialStore for MemoryStore {
     fn get(&self, entry: Entry) -> Result<Option<Zeroizing<Vec<u8>>>, CredentialError> {
         if self.unavailable {
@@ -201,185 +213,243 @@ impl CredentialStore for MemoryStore {
     }
 }
 
-/// The `session` entry.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StoredSession {
-    pub server: String,
-    pub username: String,
-    pub vault_id: String,
-    pub session_id: String,
-    pub refresh_token: Token,
-}
-
-impl fmt::Debug for StoredSession {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StoredSession")
-            .field("server", &self.server)
-            .field("username", &self.username)
-            .finish_non_exhaustive()
-    }
-}
-
-impl StoredSession {
-    pub fn server(&self) -> Result<ServerUrl, CredentialError> {
-        ServerUrl::parse(&self.server).map_err(|_| corrupt(Entry::Session))
-    }
-
-    pub fn vault(&self) -> Result<VaultId, CredentialError> {
-        self.vault_id.parse().map_err(|_| corrupt(Entry::Session))
-    }
-}
-
-/// The `local-unlock` entry.
-#[derive(Serialize, Deserialize)]
-struct StoredLocalUnlock {
-    blob: String,
-    fingerprint: String,
-}
-
 fn corrupt(entry: Entry) -> CredentialError {
     CredentialError::Other(format!("{} entry is unreadable", entry.name()))
 }
 
-pub fn load_session(store: &dyn CredentialStore) -> Result<Option<StoredSession>, CredentialError> {
-    store
-        .get(Entry::Session)?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| corrupt(Entry::Session)))
-        .transpose()
+/// The `vault-key` entry. The encoded key is zeroized on drop.
+#[derive(Serialize, Deserialize)]
+struct StoredVaultKey {
+    vault_id: String,
+    key: String,
 }
 
-pub fn save_session(
+impl Drop for StoredVaultKey {
+    fn drop(&mut self) {
+        self.key.zeroize();
+    }
+}
+
+/// The notebook's vault id and key, if stored.
+pub fn load_vault_key(
     store: &dyn CredentialStore,
-    session: &StoredSession,
-) -> Result<(), CredentialError> {
-    let bytes = Zeroizing::new(serde_json::to_vec(session).expect("sessions serialize"));
-    store.set(Entry::Session, &bytes)
+) -> Result<Option<(VaultId, VaultKey)>, CredentialError> {
+    let Some(bytes) = store.get(Entry::VaultKey)? else {
+        return Ok(None);
+    };
+    let stored: StoredVaultKey =
+        serde_json::from_slice(&bytes).map_err(|_| corrupt(Entry::VaultKey))?;
+    let vault = stored
+        .vault_id
+        .parse()
+        .map_err(|_| corrupt(Entry::VaultKey))?;
+    let key = URL_SAFE_NO_PAD
+        .decode(stored.key.as_bytes())
+        .map(Zeroizing::new)
+        .ok()
+        .and_then(|bytes| VaultKey::from_secret_bytes(&bytes).ok())
+        .ok_or_else(|| corrupt(Entry::VaultKey))?;
+    Ok(Some((vault, key)))
 }
 
-/// The local-unlock wrap and the fingerprint of the bundle it was made
-/// alongside.
-pub fn load_local_unlock(
+pub fn save_vault_key(
     store: &dyn CredentialStore,
     vault: VaultId,
-) -> Result<Option<(LocalUnlock, [u8; 32])>, CredentialError> {
+    key: &VaultKey,
+) -> Result<(), CredentialError> {
+    let stored = StoredVaultKey {
+        vault_id: vault.to_string(),
+        key: URL_SAFE_NO_PAD.encode(*key.to_secret_bytes()),
+    };
+    let bytes = Zeroizing::new(serde_json::to_vec(&stored).expect("entries serialize"));
+    store.set(Entry::VaultKey, &bytes)
+}
+
+/// The part of a legacy `session` entry the upgrade needs. Other fields,
+/// the refresh token included, are never read.
+#[derive(Deserialize)]
+struct LegacySession {
+    vault_id: String,
+}
+
+/// The vault of a legacy signed-in install, if there is one.
+pub fn load_legacy_session(
+    store: &dyn CredentialStore,
+) -> Result<Option<VaultId>, CredentialError> {
+    let Some(bytes) = store.get(Entry::Session)? else {
+        return Ok(None);
+    };
+    let session: LegacySession =
+        serde_json::from_slice(&bytes).map_err(|_| corrupt(Entry::Session))?;
+    session
+        .vault_id
+        .parse()
+        .map(Some)
+        .map_err(|_| corrupt(Entry::Session))
+}
+
+/// The legacy `local-unlock` entry.
+#[derive(Deserialize)]
+struct StoredLocalUnlock {
+    blob: String,
+}
+
+/// A legacy install's passphrase wrap of the vault key.
+pub fn load_legacy_local_unlock(
+    store: &dyn CredentialStore,
+    vault: VaultId,
+) -> Result<Option<LocalUnlock>, CredentialError> {
     let Some(bytes) = store.get(Entry::LocalUnlock)? else {
         return Ok(None);
     };
     let stored: StoredLocalUnlock =
         serde_json::from_slice(&bytes).map_err(|_| corrupt(Entry::LocalUnlock))?;
-    let blob = URL_SAFE_NO_PAD
+    URL_SAFE_NO_PAD
         .decode(&stored.blob)
         .ok()
         .and_then(|b| LocalUnlock::from_bytes(vault, &b).ok())
-        .ok_or_else(|| corrupt(Entry::LocalUnlock))?;
-    let fingerprint = URL_SAFE_NO_PAD
-        .decode(&stored.fingerprint)
-        .ok()
-        .and_then(|f| <[u8; 32]>::try_from(f).ok())
-        .ok_or_else(|| corrupt(Entry::LocalUnlock))?;
-    Ok(Some((blob, fingerprint)))
+        .map(Some)
+        .ok_or_else(|| corrupt(Entry::LocalUnlock))
 }
 
-pub fn save_local_unlock(
+/// A legacy install's stored vault key (present while it wasn't locked).
+pub fn load_legacy_auto_unlock(
     store: &dyn CredentialStore,
-    local: &LocalUnlock,
-    fingerprint: &[u8; 32],
-) -> Result<(), CredentialError> {
-    let stored = StoredLocalUnlock {
-        blob: URL_SAFE_NO_PAD.encode(local.to_bytes()),
-        fingerprint: URL_SAFE_NO_PAD.encode(fingerprint),
-    };
-    store.set(
-        Entry::LocalUnlock,
-        &serde_json::to_vec(&stored).expect("entries serialize"),
-    )
-}
-
-pub fn load_auto_unlock(store: &dyn CredentialStore) -> Result<Option<VaultKey>, CredentialError> {
+) -> Result<Option<VaultKey>, CredentialError> {
     store
         .get(Entry::AutoUnlock)?
         .map(|bytes| VaultKey::from_secret_bytes(&bytes).map_err(|_| corrupt(Entry::AutoUnlock)))
         .transpose()
 }
 
-pub fn save_auto_unlock(
-    store: &dyn CredentialStore,
-    key: &VaultKey,
-) -> Result<(), CredentialError> {
-    store.set(Entry::AutoUnlock, &*key.to_secret_bytes())
-}
-
-/// Removes every entry. Tries all three even if one fails.
-pub fn delete_all(store: &dyn CredentialStore) -> Result<(), CredentialError> {
+/// Removes the legacy entries. Tries all three even if one fails.
+pub fn delete_legacy(store: &dyn CredentialStore) -> Result<(), CredentialError> {
     let results = [Entry::AutoUnlock, Entry::LocalUnlock, Entry::Session].map(|e| store.delete(e));
     results.into_iter().collect()
+}
+
+/// Writes legacy entries as a signed-in install of the server-backed app
+/// left them, in that app's format.
+#[cfg(test)]
+pub mod legacy {
+    use super::*;
+
+    pub const REFRESH_TOKEN: &str = "legacy-refresh-secret";
+
+    pub fn save_session(store: &dyn CredentialStore, vault: VaultId) {
+        let session = serde_json::json!({
+            "server": "https://notes.example.com",
+            "username": "alice",
+            "vault_id": vault.to_string(),
+            "session_id": "s1",
+            "refresh_token": REFRESH_TOKEN,
+        });
+        store
+            .set(Entry::Session, &serde_json::to_vec(&session).unwrap())
+            .unwrap();
+    }
+
+    pub fn save_local_unlock(store: &dyn CredentialStore, local: &LocalUnlock) {
+        let stored = serde_json::json!({
+            "blob": URL_SAFE_NO_PAD.encode(local.to_bytes()),
+            "fingerprint": URL_SAFE_NO_PAD.encode([9u8; 32]),
+        });
+        store
+            .set(Entry::LocalUnlock, &serde_json::to_vec(&stored).unwrap())
+            .unwrap();
+    }
+
+    pub fn save_auto_unlock(store: &dyn CredentialStore, key: &VaultKey) {
+        store
+            .set(Entry::AutoUnlock, &*key.to_secret_bytes())
+            .unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn session() -> StoredSession {
-        StoredSession {
-            server: "https://notes.example.com".into(),
-            username: "alice".into(),
-            vault_id: VaultId::from_parts(1, 1).to_string(),
-            session_id: "s1".into(),
-            refresh_token: Token("refresh-secret".into()),
-        }
+    fn vault() -> VaultId {
+        VaultId::from_parts(1, 1)
     }
 
     #[test]
-    fn entries_round_trip_and_delete() {
+    fn vault_key_round_trips() {
         let store = MemoryStore::new();
-        assert_eq!(load_session(&store).unwrap(), None);
-        save_session(&store, &session()).unwrap();
-        assert_eq!(load_session(&store).unwrap(), Some(session()));
-        assert_eq!(
-            load_session(&store).unwrap().unwrap().vault().unwrap(),
-            VaultId::from_parts(1, 1)
-        );
-
-        let vault = VaultId::from_parts(1, 1);
+        assert!(load_vault_key(&store).unwrap().is_none());
         let key = VaultKey::generate().unwrap();
-        save_auto_unlock(&store, &key).unwrap();
-        let loaded = load_auto_unlock(&store).unwrap().unwrap();
+        save_vault_key(&store, vault(), &key).unwrap();
+        let (loaded_vault, loaded) = load_vault_key(&store).unwrap().unwrap();
+        assert_eq!(loaded_vault, vault());
+        assert_eq!(*loaded.to_secret_bytes(), *key.to_secret_bytes());
+        store.delete(Entry::VaultKey).unwrap();
+        assert!(load_vault_key(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_entries_are_read_and_deleted() {
+        let store = MemoryStore::new();
+        assert_eq!(load_legacy_session(&store).unwrap(), None);
+        legacy::save_session(&store, vault());
+        assert_eq!(load_legacy_session(&store).unwrap(), Some(vault()));
+
+        let key = VaultKey::generate().unwrap();
+        legacy::save_auto_unlock(&store, &key);
+        let loaded = load_legacy_auto_unlock(&store).unwrap().unwrap();
         assert_eq!(*loaded.to_secret_bytes(), *key.to_secret_bytes());
 
-        let local = LocalUnlock::seal(vault, &key, "correct horse battery").unwrap();
-        save_local_unlock(&store, &local, &[9; 32]).unwrap();
-        let (loaded, fingerprint) = load_local_unlock(&store, vault).unwrap().unwrap();
-        assert_eq!(loaded, local);
-        assert_eq!(fingerprint, [9; 32]);
+        let local = LocalUnlock::seal(vault(), &key, "correct horse battery").unwrap();
+        legacy::save_local_unlock(&store, &local);
+        assert_eq!(
+            load_legacy_local_unlock(&store, vault()).unwrap(),
+            Some(local)
+        );
 
-        delete_all(&store).unwrap();
-        assert_eq!(load_session(&store).unwrap(), None);
-        assert!(load_auto_unlock(&store).unwrap().is_none());
-        assert!(load_local_unlock(&store, vault).unwrap().is_none());
+        save_vault_key(&store, vault(), &key).unwrap();
+        delete_legacy(&store).unwrap();
+        assert_eq!(load_legacy_session(&store).unwrap(), None);
+        assert!(load_legacy_auto_unlock(&store).unwrap().is_none());
+        assert!(load_legacy_local_unlock(&store, vault()).unwrap().is_none());
+        // The new entry is not legacy.
+        assert!(load_vault_key(&store).unwrap().is_some());
         // Deleting again is fine.
-        delete_all(&store).unwrap();
+        delete_legacy(&store).unwrap();
     }
 
     #[test]
     fn unavailable_store_reports_no_secure_store() {
         let store = MemoryStore::unavailable();
+        let key = VaultKey::generate().unwrap();
         assert_eq!(
-            save_session(&store, &session()),
+            save_vault_key(&store, vault(), &key),
             Err(CredentialError::NoSecureStore)
         );
-        assert_eq!(load_session(&store), Err(CredentialError::NoSecureStore));
+        assert!(matches!(
+            load_vault_key(&store),
+            Err(CredentialError::NoSecureStore)
+        ));
+        assert_eq!(
+            load_legacy_session(&store),
+            Err(CredentialError::NoSecureStore)
+        );
     }
 
     #[test]
     fn corrupt_entries_are_errors_without_contents() {
         let store = MemoryStore::new();
         store
-            .set(Entry::Session, b"refresh-secret not json")
+            .set(Entry::Session, b"legacy-refresh-secret not json")
             .unwrap();
-        let err = load_session(&store).unwrap_err();
+        let err = load_legacy_session(&store).unwrap_err();
         assert!(!err.to_string().contains("refresh-secret"));
         store.set(Entry::AutoUnlock, &[1; 5]).unwrap();
-        assert!(load_auto_unlock(&store).is_err());
+        assert!(load_legacy_auto_unlock(&store).is_err());
+        store
+            .set(Entry::VaultKey, br#"{"vault_id":"x","key":"secret"}"#)
+            .unwrap();
+        let err = load_vault_key(&store).err().unwrap();
+        assert!(!err.to_string().contains("secret"));
     }
 
     /// Writes to the real OS store, so it runs only on request:
@@ -389,10 +459,10 @@ mod tests {
     fn keyring_round_trip() {
         let account = format!("test-{}", std::process::id());
         let store = KeyringStore::new(&account);
-        store.set(Entry::Session, b"probe").unwrap();
+        store.set(Entry::VaultKey, b"probe").unwrap();
         assert_eq!(
             store
-                .get(Entry::Session)
+                .get(Entry::VaultKey)
                 .unwrap()
                 .as_deref()
                 .map(Vec::as_slice),
@@ -402,17 +472,12 @@ mod tests {
         {
             let found = std::process::Command::new("security")
                 .args(["find-generic-password", "-s", SERVICE, "-a"])
-                .arg(format!("{account}:session"))
+                .arg(format!("{account}:vault-key"))
                 .output()
                 .unwrap();
             assert!(found.status.success(), "entry not in the login keychain");
         }
-        store.delete(Entry::Session).unwrap();
-        assert!(store.get(Entry::Session).unwrap().is_none());
-    }
-
-    #[test]
-    fn session_debug_hides_the_token() {
-        assert!(!format!("{:?}", session()).contains("refresh-secret"));
+        store.delete(Entry::VaultKey).unwrap();
+        assert!(store.get(Entry::VaultKey).unwrap().is_none());
     }
 }

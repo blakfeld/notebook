@@ -1,9 +1,9 @@
 import { FakeCoreApi } from './fake'
 
 /**
- * The fake core with a few sample notes, for viewing the UI with `npm run
- * dev` in a plain browser. Sign in as `alice` / `correct horse battery`.
- * Dev builds only; never part of a production bundle.
+ * The fake core, open, with a few sample notes, for viewing the UI with
+ * `npm run dev` in a plain browser. Dev builds only; never part of a
+ * production bundle.
  */
 export function demoCore(): FakeCoreApi {
   const core = new FakeCoreApi([
@@ -12,11 +12,12 @@ export function demoCore(): FakeCoreApi {
       pinned: true,
     },
     { body: '# Groceries\n- eggs\n- milk\n#home' },
-    { body: 'Standup notes\nShipped the sync engine. #work' },
+    { body: 'Standup notes\nShipped the tag tree. #work' },
     { body: '' },
     { body: '# Old idea\nSomething for later. #ideas', archived: true },
     { body: '# Draft\nNot needed any more.', trashed: true },
   ])
+  core.phase = { phase: 'open', secure_store: true, upgrade: false }
   core.latency = 50
   return core
 }
