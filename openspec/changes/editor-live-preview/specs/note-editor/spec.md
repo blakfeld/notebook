@@ -25,7 +25,7 @@ On every line that no selection range touches, live preview SHALL hide markdown 
 - **THEN** the line shows `See the docs` with `the docs` styled as a link
 
 ### Requirement: Syntax revealed around the selection
-Live preview SHALL show the full markdown source, with syntax markers visible and de-emphasized, on every line touched by any selection range, including the main cursor, additional cursors, and multi-line selections. Formatting of the text between markers SHALL remain applied while revealed. Reveal SHALL follow only the local selection, never other devices' edits.
+Live preview SHALL show the full markdown source, with syntax markers visible and de-emphasized, on every line touched by any selection range, including the main cursor, additional cursors, and multi-line selections. Formatting of the text between markers SHALL remain applied while revealed. Reveal SHALL follow only the selection, never changes applied to the document from elsewhere.
 
 #### Scenario: Cursor enters a line
 - **WHEN** the cursor moves onto a line showing `Some bold text` whose source is `Some **bold** text`
@@ -69,7 +69,7 @@ Live preview SHALL NOT load any resource referenced by note text, such as images
 - **THEN** the image markdown is shown as text and no request is made to `tracker.example`
 
 ### Requirement: Opening links
-A plain mouse click on link text SHALL place the cursor for editing. Mod-click (Cmd on macOS, Ctrl elsewhere) on a link, or a touch tap on a rendered link on a line no selection touches, SHALL open the URL in the system browser, outside the app. Only `http`, `https`, and `mailto` URLs SHALL open; any other scheme SHALL do nothing.
+A plain mouse click on link text SHALL place the cursor for editing. Mod-click (Cmd on macOS, Ctrl elsewhere) on a link SHALL open the URL in the system browser, outside the app. Only `http`, `https`, and `mailto` URLs SHALL open; any other scheme SHALL do nothing.
 
 #### Scenario: Plain click edits
 - **WHEN** the user clicks link text without a modifier
@@ -78,10 +78,6 @@ A plain mouse click on link text SHALL place the cursor for editing. Mod-click (
 #### Scenario: Mod-click opens externally
 - **WHEN** the user Mod-clicks a link to `https://example.com`
 - **THEN** `https://example.com` opens in the system browser and the app stays on the note
-
-#### Scenario: Touch tap on a rendered link
-- **WHEN** on a touch device the user taps a rendered link on a line the cursor is not on
-- **THEN** the URL opens in the system browser; a tap on the same link after the cursor is on its line places the cursor instead
 
 #### Scenario: Disallowed scheme
 - **WHEN** the user Mod-clicks a link whose URL is `javascript:alert(1)` or `file:///etc/passwd`
@@ -154,17 +150,6 @@ When vim mode is on, vim motions, operators, and text objects SHALL act on the u
 - **WHEN** the user presses `V` and then `j` in vim normal mode
 - **THEN** both selected lines show their markdown syntax
 
-### Requirement: Live preview under remote edits
-When updates from other devices change the open note, live preview SHALL re-render the affected text, and the local cursor, selection, and set of revealed lines SHALL stay on the same text they were on before the update.
-
-#### Scenario: Remote edit on a rendered line
-- **WHEN** another device changes `*draft*` to `**final**` on a line the local cursor is not on
-- **THEN** that line renders `final` in strong weight with its markers hidden, and the local cursor does not move
-
-#### Scenario: Remote edit above the cursor
-- **WHEN** another device inserts two lines above the line the local cursor is on
-- **THEN** the cursor's line is still the only revealed line
-
 ### Requirement: Readable typography and measure
 In live preview, prose SHALL use a proportional font and code a monospace font, both bundled with the app so no font is fetched from another origin. Lines of text SHALL wrap at a maximum measure of 72 characters of body text, centered in the editor pane when wider, and the editor SHALL keep at least 16px of horizontal padding at any width.
 
@@ -206,12 +191,12 @@ The editor SHALL offer a source view in which all live-preview rendering is off 
 - **THEN** the typed word is removed
 
 ### Requirement: View preferences are per device
-Source view and focus mode SHALL each be togglable by a keyboard command and from the editor's view options, and each SHALL be stored as a device-local, non-sensitive preference that is not synced. Both SHALL default to off, and the chosen view SHALL apply to every note opened on that device.
+Source view and focus mode SHALL each be togglable by a keyboard command and from the editor's view options, and each SHALL be stored as a device-local, non-sensitive preference that is not stored in the vault or its backups. Both SHALL default to off, and the chosen view SHALL apply to every note opened on that device.
 
 #### Scenario: Preference persists
 - **WHEN** the user turns on source view, closes the note, and opens another note
 - **THEN** the other note opens in source view
 
 #### Scenario: Not synced
-- **WHEN** the user turns on focus mode on the desktop app
-- **THEN** a browser session on the same account still has focus mode off
+- **WHEN** the user turns on focus mode and a backup of the notebook is restored on another computer
+- **THEN** that computer still has focus mode off

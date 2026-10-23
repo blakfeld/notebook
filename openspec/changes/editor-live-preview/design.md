@@ -6,9 +6,9 @@ See proposal.md for motivation. This change builds on the CodeMirror 6 editor de
 
 Constraints that shape the approach:
 
-- **CSP.** The Tauri CSP is `default-src 'self'` with `style-src 'self' 'unsafe-inline'`. The server CSP (from `server-hosting`) allows scripts, styles, and connections only from its own origin. Fonts, code-highlighting grammars, and theme CSS must ship as same-origin bundled assets. No remote fonts, no `eval`.
+- **CSP.** The Tauri CSP is `default-src 'self'` with `style-src 'self' 'unsafe-inline'`. Fonts, code-highlighting grammars, and theme CSS must ship as same-origin bundled assets. No remote fonts, no `eval`.
 - **E2EE privacy.** Opening a note must not reveal anything to a third party. That rules out loading images or link previews referenced in note text.
-- **One frontend** for desktop, browser, and mobile. UI code may not import `@tauri-apps/api` outside `web/src/platform/`.
+- **Desktop only.** Browser and mobile clients were dropped (`local-only-desktop`), but UI code still may not import `@tauri-apps/api` outside `web/src/platform/`, which keeps the browser dev build (fake core) working.
 - `app.css` already defines `--text`, `--muted`, `--bg` with a `prefers-color-scheme` media query. This change replaces that with a token set that also supports a manual override.
 
 ## Goals / Non-Goals
@@ -24,7 +24,7 @@ Constraints that shape the approach:
 - Remote collaborator cursors or presence.
 - A separate reading-only mode. Live preview is always editable.
 - Custom user themes or font selection. Two built-in themes only.
-- The mobile keyboard toolbar (owned by `mobile-app`).
+- Touch interactions (tap-to-open links, keyboard toolbar). Mobile was dropped.
 
 ## Decisions
 
@@ -40,7 +40,7 @@ All hidden ranges are within a single line (inline markers, ATX heading markers,
 
 A line is "active" when any `state.selection.ranges` range touches it (from `lineAt(range.from)` through `lineAt(range.to)`). On active lines, marker `replace` decorations are swapped for a `cm-md-syntax` mark that dims the markers. Content marks such as strong and heading size stay. Checkbox, bullet, and rule widgets are not drawn on active lines.
 
-*Alternatives:* Obsidian-style per-node reveal (only the construct under the cursor) is finer but causes more horizontal jitter while moving within a line and is harder to keep predictable with vim motions. Per-line reveal is simple to specify and test. Reveal follows only the local selection. `y-codemirror.next` maps the selection through remote changes, so the active line set follows the text automatically.
+*Alternatives:* Obsidian-style per-node reveal (only the construct under the cursor) is finer but causes more horizontal jitter while moving within a line and is harder to keep predictable with vim motions. Per-line reveal is simple to specify and test. Reveal follows only the selection. `y-codemirror.next` maps the selection through any non-local document change, so the active line set follows the text automatically.
 
 ### 3. Hidden ranges are not atomic
 
@@ -48,17 +48,17 @@ Hidden markers are not registered with `EditorView.atomicRanges`. A cursor can o
 
 ### 4. Checkboxes as widgets that dispatch ordinary transactions
 
-`[ ]`/`[x]` (the GFM `TaskMarker` node) is replaced by a `CheckboxWidget` (`<input type="checkbox">` with `aria-label`). It handles `pointerdown` (so mouse, pen, and touch all work), calls `preventDefault()` so the selection doesn't move, and dispatches `{changes: {from: markerPos + 1, to: markerPos + 2, insert: checked ? ' ' : 'x'}, userEvent: 'input.toggle-task'}`. This is a plain local transaction, so it flows through the Yjs binding, is captured by the local `Y.UndoManager`, and syncs like typing. `ignoreEvent()` returns false only for the handled events.
+`[ ]`/`[x]` (the GFM `TaskMarker` node) is replaced by a `CheckboxWidget` (`<input type="checkbox">` with `aria-label`). It handles `pointerdown` (so mouse, pen, and touch all work), calls `preventDefault()` so the selection doesn't move, and dispatches `{changes: {from: markerPos + 1, to: markerPos + 2, insert: checked ? ' ' : 'x'}, userEvent: 'input.toggle-task'}`. This is a plain local transaction, so it flows through the Yjs binding, is captured by the local `Y.UndoManager`, and is saved like typing. `ignoreEvent()` returns false only for the handled events.
 
 The toggle-task command is bound to `Mod-Enter` in the live-preview keymap (CM's default `insertBlankLine` on `Mod-Enter` is low value in prose). It is registered at higher precedence than the vim keymap so it works in vim normal and insert modes. It edits the same character, or inserts `[ ] ` after a bullet or ordered list marker.
 
-### 5. Links: Mod-click and touch tap via the platform adapter
+### 5. Links: Mod-click via the platform adapter
 
-Link text gets a `cm-md-link` mark carrying the URL in a data attribute. A `domEventHandlers` `mousedown` handler opens the link when Mod is held. A `touchend` handler without movement opens a link on a non-active line. Opening goes through a new platform adapter function `openExternal(url: string)`:
+Link text gets a `cm-md-link` mark carrying the URL in a data attribute. A `domEventHandlers` `mousedown` handler opens the link when Mod is held. Opening goes through a new platform adapter function `openExternal(url: string)`:
 
 - **Validation happens in the frontend before the call:** `new URL(url)` must parse and `protocol` must be `http:`, `https:`, or `mailto:`. Anything else is a no-op.
 - **Tauri:** `@tauri-apps/plugin-opener` `openUrl`, with the `opener:allow-open-url` permission scoped to `http://*`, `https://*`, and `mailto:*` in `crates/notebook-app/capabilities/default.json`. The scope enforces the same allowlist host-side.
-- **Browser:** `window.open(url, '_blank', 'noopener,noreferrer')`.
+- **Browser dev build:** `window.open(url, '_blank', 'noopener,noreferrer')`.
 
 *Alternative:* plain `<a href>` elements inside the editor were rejected. They would navigate the Tauri webview itself, and a click would fight with cursor placement.
 
@@ -80,7 +80,7 @@ Preventing a flash of the wrong theme: an inline `<script>` in `index.html` is f
 
 ### 9. Preferences through the existing device-local settings
 
-`theme`, `editor.sourceView`, and `editor.focusMode` are stored through the same device-local settings API that `note-editor-component` introduced for vim mode. On native that is app-local settings. In the browser it is `localStorage`, which `browser-web-client` permits for non-sensitive UI preferences. A small Svelte store (`web/src/lib/preferences.ts`) exposes them reactively. Read failures fall back to defaults.
+`theme`, `editor.sourceView`, and `editor.focusMode` are stored through the same device-local settings API that `note-editor-component` introduced for vim mode. On native that is app-local settings. The browser dev build uses the fake core's in-memory settings. A small Svelte store (`web/src/lib/preferences.ts`) exposes them reactively. Read failures fall back to defaults.
 
 ### 10. Compartments for source view and focus mode
 
@@ -102,7 +102,7 @@ Self-hosted variable fonts via `@fontsource-variable/inter` (prose) and `@fontso
 - [Decoration rebuild cost on every selection change in long notes] → Viewport-limited walk. Add a Vitest benchmark-style test that builds decorations for a 5,000-line note and asserts it touches only visible ranges. Manually check typing latency on a large note.
 - [Lezer parse lags on very large notes, so far-away text renders as source until parsed] → Acceptable. Decorations update when the tree advances (Decision 1).
 - [IME composition inside a line whose decorations change mid-composition can break input] → The reveal set only changes on selection moves to another line, not during composition on the same line. Include a manual QA step with a CJK IME.
-- [CodeMirror's injected styles vs. a strict server CSP without `'unsafe-inline'` styles] → Live preview adds only class-based rules through `EditorView.theme`, the same mechanism the base editor already uses. Whatever `note-editor-component`/`browser-web-client` settle for CM style injection (`EditorView.cspNonce` or constructable stylesheets) covers this change too. Fonts need `font-src` to permit `'self'`, which `default-src 'self'` does.
+- [CodeMirror's injected styles vs. a stricter CSP without `'unsafe-inline'` styles] → Live preview adds only class-based rules through `EditorView.theme`, the same mechanism the base editor already uses. Whatever `note-editor-component` settled for CM style injection (`EditorView.cspNonce` or constructable stylesheets) covers this change too. Fonts need `font-src` to permit `'self'`, which `default-src 'self'` does.
 - [`language-data` grammars add bundle weight] → They are lazy chunks, loaded only when a note contains that language.
 - [Opener plugin widens the Tauri capability surface] → Scoped to `http`, `https`, and `mailto` host-side, validated again in the frontend, and invoked only on explicit user gesture.
 - [Vim plugin's own `Mod-Enter` or visual-mode handling may conflict] → Keymap precedence set explicitly. Covered by a test that runs the command with vim enabled.
