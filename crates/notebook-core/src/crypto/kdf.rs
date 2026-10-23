@@ -36,12 +36,10 @@ impl KdfVersion {
     }
 
     fn params(self) -> Params {
-        self.params_with_output(Some(OUTPUT_LEN))
-    }
-
-    fn params_with_output(self, output_len: Option<usize>) -> Params {
         match self {
-            Self::V1 => Params::new(64 * 1024, 3, 1, output_len).expect("V1 parameters are valid"),
+            Self::V1 => {
+                Params::new(64 * 1024, 3, 1, Some(OUTPUT_LEN)).expect("V1 parameters are valid")
+            }
         }
     }
 }
@@ -70,9 +68,8 @@ impl Salt {
 
 /// Derives an [`AuthSecret`] from a passphrase with Argon2id.
 ///
-/// Normal login doesn't use this: the OPAQUE export key is already a strong
-/// secret. It exists so any path that starts from a passphrase directly uses
-/// vetted, versioned parameters.
+/// Only [`LocalUnlock`](super::LocalUnlock) uses this, to upgrade installs
+/// from the server-backed version that were locked with a passphrase.
 pub fn derive_auth_secret(
     passphrase: &[u8],
     salt: &Salt,
@@ -83,20 +80,6 @@ pub fn derive_auth_secret(
         .hash_password_into(passphrase, &salt.0, &mut *out)
         .map_err(|_| CryptoError::Kdf)?;
     AuthSecret::from_bytes(&*out)
-}
-
-/// Stretches `input` into `out` (any length Argon2 allows) with the
-/// [`KdfVersion::CURRENT`] parameters and an all-zero salt. This is the OPAQUE
-/// key-stretching step: its input is already a unique, per-user OPRF output,
-/// so a salt adds nothing.
-pub(crate) fn stretch(input: &[u8], out: &mut [u8]) -> Result<(), CryptoError> {
-    Argon2::new(
-        Algorithm::Argon2id,
-        Version::V0x13,
-        KdfVersion::CURRENT.params_with_output(None),
-    )
-    .hash_password_into(input, &[0; SALT_LEN], out)
-    .map_err(|_| CryptoError::Kdf)
 }
 
 #[cfg(test)]
@@ -110,7 +93,9 @@ mod tests {
     fn derive(passphrase: &str, salt: &Salt) -> [u8; 32] {
         let secret = derive_auth_secret(passphrase.as_bytes(), salt, KdfVersion::V1).unwrap();
         // Compare through a derived key, since the secret's bytes are private.
-        *secret.wrapping_key(VaultId::from_parts(0, 0)).as_bytes()
+        *secret
+            .local_wrapping_key(VaultId::from_parts(0, 0))
+            .as_bytes()
     }
 
     #[test]
@@ -164,49 +149,21 @@ mod tests {
     }
 
     #[test]
-    fn stretch_supports_64_byte_output_and_matches_derivation_at_32() {
-        let mut long = [0u8; 64];
-        stretch(b"input", &mut long).unwrap();
-        assert_ne!(long, [0; 64]);
-
-        // With a 32-byte output and a zero salt, stretching is the same
-        // Argon2id computation as `derive_auth_secret`.
-        let mut short = [0u8; 32];
-        stretch(b"input", &mut short).unwrap();
-        let derived = derive_auth_secret(b"input", &Salt([0; SALT_LEN]), KdfVersion::V1).unwrap();
-        let expected = AuthSecret::from_bytes(&short).unwrap();
-        let vault = VaultId::from_parts(0, 0);
-        assert_eq!(
-            derived.wrapping_key(vault).as_bytes(),
-            expected.wrapping_key(vault).as_bytes()
-        );
-    }
-
-    #[test]
     fn empty_and_non_utf8_passphrases_derive() {
         derive_auth_secret(b"", &SALT_A, KdfVersion::V1).unwrap();
         derive_auth_secret(&[0xff, 0xfe, 0x00], &SALT_A, KdfVersion::V1).unwrap();
     }
 
     #[test]
-    fn derived_secret_unlocks_a_bundle() {
-        use crate::crypto::{KeyBundle, RecoveryKey, VaultKey};
+    fn derived_secret_opens_a_local_unlock() {
+        use crate::crypto::{LocalUnlock, VaultKey};
         let vault = VaultId::from_parts(1_000, 1);
-        let salt = Salt::generate().unwrap();
-        let auth = derive_auth_secret(b"correct horse", &salt, KdfVersion::CURRENT).unwrap();
-        let bundle = KeyBundle::create(
-            vault,
-            &VaultKey::generate().unwrap(),
-            &auth,
-            &RecoveryKey::generate().unwrap(),
-        )
-        .unwrap();
-
-        let again = derive_auth_secret(b"correct horse", &salt, KdfVersion::CURRENT).unwrap();
-        assert!(bundle.unlock_with_auth(&again).is_ok());
-        let wrong = derive_auth_secret(b"wrong horse", &salt, KdfVersion::CURRENT).unwrap();
+        let key = VaultKey::generate().unwrap();
+        let sealed = LocalUnlock::seal(vault, &key, "correct horse").unwrap();
+        let opened = sealed.open("correct horse").unwrap();
+        assert_eq!(*opened.to_secret_bytes(), *key.to_secret_bytes());
         assert!(matches!(
-            bundle.unlock_with_auth(&wrong),
+            sealed.open("wrong horse"),
             Err(CryptoError::Decrypt)
         ));
     }

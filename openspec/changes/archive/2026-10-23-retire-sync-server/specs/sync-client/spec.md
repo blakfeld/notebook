@@ -43,8 +43,8 @@
 **Migration**: None. Local edits are written straight to local storage (`local-storage`).
 
 ### Requirement: Client-driven snapshots
-**Reason**: There is no sync server to sync with.
-**Migration**: None. Local edits are written straight to local storage (`local-storage`).
+**Reason**: There is no sync server to upload snapshots to.
+**Migration**: Long logs are compacted on the device instead ("Long logs are compacted locally" in `local-storage`).
 
 ### Requirement: Permanent purge
 **Reason**: There is no sync server to sync with.
@@ -59,8 +59,8 @@
 **Migration**: None. Local edits are written straight to local storage (`local-storage`).
 
 ### Requirement: Unknown document format waits for an upgrade
-**Reason**: There is no sync server to sync with.
-**Migration**: None. Local edits are written straight to local storage (`local-storage`).
+**Reason**: There is no sync server to receive newer data from.
+**Migration**: Stores upgraded from syncing installs may still hold such data; it is kept and never compacted away ("Long logs are compacted locally" in `local-storage`).
 
 ### Requirement: Session expiry
 **Reason**: There is no sync server to sync with.

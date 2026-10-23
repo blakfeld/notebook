@@ -96,5 +96,4 @@ jobs:
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p notebook-core --target wasm32-unknown-unknown
-      - run: cargo build -p notebook-core --target wasm32-unknown-unknown --features transport-wasm
-      - run: cargo clippy -p notebook-core --target wasm32-unknown-unknown --features transport-wasm -- -D warnings
+      - run: cargo clippy -p notebook-core --target wasm32-unknown-unknown -- -D warnings

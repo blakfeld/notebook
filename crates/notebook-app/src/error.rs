@@ -6,8 +6,8 @@
 use std::fmt;
 
 use notebook_core::export::ExportError;
+use notebook_core::replica::ReplicaError;
 use notebook_core::storage::StorageError;
-use notebook_core::sync::ReplicaError;
 use notebook_core::workspace::WorkspaceError;
 use serde::Serialize;
 
@@ -79,7 +79,7 @@ impl From<WorkspaceError> for AppError {
             // to change.
             WorkspaceError::Unrepresentable(_) => Code::InvalidTagName,
             WorkspaceError::Replica(ReplicaError::EditorSessionNotFound(_)) => Code::NotFound,
-            WorkspaceError::Replica(_) | WorkspaceError::Sync(_) => Code::Internal,
+            WorkspaceError::Replica(_) => Code::Internal,
         };
         Self::new(code, message)
     }

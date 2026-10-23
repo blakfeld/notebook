@@ -7,7 +7,6 @@
 
 use std::fmt;
 
-use hkdf::Hkdf;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -20,10 +19,8 @@ const ENCODED_LEN: usize = 32;
 const GROUP_LEN: usize = 4;
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CHECKSUM_DOMAIN: &[u8] = b"notebook/v1/recovery";
-const INFO_VERIFIER: &[u8] = b"notebook/v1/recovery-verifier";
-
-/// Length of a [`RecoveryKey::verifier`] in bytes.
-pub const RECOVERY_VERIFIER_LEN: usize = 32;
+// "notebook/v1/recovery-verifier" was the server's recovery check label;
+// never reuse it.
 
 /// A recovery key generated at vault creation.
 #[derive(Zeroize, ZeroizeOnDrop)]
@@ -93,19 +90,6 @@ impl RecoveryKey {
 
     pub(crate) fn wrapping_key(&self, vault: VaultId) -> SymmetricKey {
         recovery_wrapping_key(&self.0, vault)
-    }
-
-    /// A value the server stores (hashed) to check that a client holds this
-    /// recovery key. It is an HKDF-SHA256 output under its own info string,
-    /// independent of the wrapping key, so it can't unwrap anything. No salt:
-    /// the 16 random bytes are unique, and a recovering client doesn't know
-    /// its vault ID yet.
-    pub fn verifier(&self) -> [u8; RECOVERY_VERIFIER_LEN] {
-        let mut out = [0u8; RECOVERY_VERIFIER_LEN];
-        Hkdf::<Sha256>::new(None, &self.0)
-            .expand(INFO_VERIFIER, &mut out)
-            .expect("32 bytes is a valid HKDF-SHA256 output length");
-        out
     }
 }
 
@@ -352,73 +336,14 @@ mod tests {
     }
 
     #[test]
-    fn verifier_is_deterministic_across_display_round_trip() {
-        let key = RecoveryKey::generate().unwrap();
-        let typed = key.to_display().to_lowercase();
-        assert_eq!(
-            RecoveryKey::parse(&typed).unwrap().verifier(),
-            key.verifier()
-        );
-    }
-
-    #[test]
-    fn different_keys_give_different_verifiers() {
-        let a = RecoveryKey::generate().unwrap();
-        let b = RecoveryKey::generate().unwrap();
-        assert_ne!(a.verifier(), b.verifier());
-    }
-
-    #[test]
-    fn verifier_does_not_unlock_the_bundle() {
-        use crate::crypto::{AuthSecret, KeyBundle, VaultKey};
+    fn parsed_key_opens_the_recovery_entry() {
+        use crate::crypto::{RecoveryEntry, VaultKey};
         let vault = VaultId::from_parts(1_000, 1);
         let recovery = RecoveryKey::generate().unwrap();
-        let bundle = KeyBundle::create(
-            vault,
-            &VaultKey::generate().unwrap(),
-            &AuthSecret::from_bytes(&[1; 32]).unwrap(),
-            &recovery,
-        )
-        .unwrap();
-        let as_auth = AuthSecret::from_bytes(&recovery.verifier()).unwrap();
-        assert_eq!(
-            bundle.unlock_with_auth(&as_auth).unwrap_err(),
-            CryptoError::Decrypt
-        );
-        assert_ne!(
-            recovery.verifier(),
-            *recovery.wrapping_key(vault).as_bytes()
-        );
-    }
-
-    /// Cross-checked against an independent HKDF-SHA256 implementation.
-    #[test]
-    fn fixed_verifier_vectors() {
-        let hex = |b: [u8; 32]| b.iter().map(|b| format!("{b:02x}")).collect::<String>();
-        assert_eq!(
-            hex(RecoveryKey(std::array::from_fn(|i| i as u8)).verifier()),
-            "94c96491f38f126d3d23d55a95048278d812cefb06ff6cfce27213a22d17a851"
-        );
-        assert_eq!(
-            hex(RecoveryKey([0; RANDOM_LEN]).verifier()),
-            "e3b6871a9999794f21926e3e71ab7e7998d414fa7cfe16e3c4d6bab30cd065b2"
-        );
-    }
-
-    #[test]
-    fn parsed_key_unlocks_the_bundle() {
-        use crate::crypto::{AuthSecret, KeyBundle, VaultKey};
-        let vault = VaultId::from_parts(1_000, 1);
-        let recovery = RecoveryKey::generate().unwrap();
-        let bundle = KeyBundle::create(
-            vault,
-            &VaultKey::generate().unwrap(),
-            &AuthSecret::from_bytes(&[1; 32]).unwrap(),
-            &recovery,
-        )
-        .unwrap();
+        let entry =
+            RecoveryEntry::create(vault, &VaultKey::generate().unwrap(), &recovery).unwrap();
         let typed = recovery.to_display().to_lowercase().replace('-', " ");
         let parsed = RecoveryKey::parse(&typed).unwrap();
-        assert!(bundle.unlock_with_recovery(&parsed).is_ok());
+        assert!(entry.open(&parsed).is_ok());
     }
 }

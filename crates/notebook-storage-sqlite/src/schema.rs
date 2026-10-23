@@ -4,7 +4,7 @@ use rusqlite::Connection;
 
 /// Migrations in order; applying entry `i` takes the store from layout
 /// version `i` to `i + 1`. Existing entries must never change; add new ones.
-pub(crate) const MIGRATIONS: &[&str] = &[V1, V2];
+pub(crate) const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 const V1: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value ANY NOT NULL) STRICT;
@@ -34,6 +34,30 @@ CREATE TABLE vault_meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     recovery_entry BLOB NOT NULL
 ) STRICT;
+";
+
+/// Drops what only sync needed: update IDs, server sequence numbers, the
+/// outbox flag, pending-key flags, and the sync cursor. Every log entry is
+/// kept, acknowledged or not, in its original position, and the position
+/// counter carries over so positions are never reused.
+const V3: &str = "
+DROP INDEX log_pending;
+CREATE TABLE log_v3 (
+    pos INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id BLOB NOT NULL REFERENCES notes ON DELETE CASCADE,
+    kind INTEGER NOT NULL,
+    bytes BLOB NOT NULL
+) STRICT;
+INSERT INTO log_v3 (pos, note_id, kind, bytes)
+    SELECT pos, note_id, kind, bytes FROM log ORDER BY pos;
+DELETE FROM sqlite_sequence WHERE name = 'log_v3';
+UPDATE sqlite_sequence SET name = 'log_v3' WHERE name = 'log';
+DROP INDEX log_note;
+DROP TABLE log;
+ALTER TABLE log_v3 RENAME TO log;
+CREATE INDEX log_note ON log(note_id, pos);
+ALTER TABLE notes DROP COLUMN key_pending;
+DELETE FROM meta WHERE key = 'cursor';
 ";
 
 /// The store's layout version.

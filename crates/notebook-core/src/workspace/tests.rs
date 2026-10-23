@@ -1,16 +1,11 @@
-//! Workspace tests over real replicas and engines against the fake server.
-
-use std::time::Duration;
+//! Workspace tests over real replicas on in-memory stores.
 
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::executor::{LocalPool, LocalSpawner};
-use futures::task::LocalSpawnExt;
 
 use super::*;
 use crate::crypto::VaultId;
+use crate::replica::vault_keys;
 use crate::storage::MemoryStorage;
-use crate::sync::fake::{FakeServer, FakeSession, ManualTimer, vault_keys};
-use crate::sync::{SyncConfig, SyncEngine};
 
 const T1: Timestamp = Timestamp(1_700_000_000_000);
 const T2: Timestamp = Timestamp(1_700_000_001_000);
@@ -27,86 +22,20 @@ fn tag(path: &str) -> Selection {
 
 const NOTES: Selection = Selection::View(View::Notes);
 
-struct Sim {
-    pool: LocalPool,
-    spawner: LocalSpawner,
-    timer: ManualTimer,
-    server: FakeServer,
-}
-
 struct Device {
     ws: Workspace<MemoryStorage>,
     changes: UnboundedReceiver<Changed>,
-    /// Engine events, for the test to pass to the workspace as a host would.
-    events: UnboundedReceiver<SyncEvent>,
 }
 
-impl Sim {
-    fn new() -> Self {
-        let pool = LocalPool::new();
-        let spawner = pool.spawner();
-        let timer = ManualTimer::new();
-        let server = FakeServer::new(timer.clone());
-        Self {
-            pool,
-            spawner,
-            timer,
-            server,
-        }
-    }
+fn device() -> Device {
+    device_on(MemoryStorage::new(vault()))
+}
 
-    fn device(&mut self) -> Device {
-        self.device_on(MemoryStorage::new(vault()))
-    }
-
-    fn device_on(&mut self, storage: MemoryStorage) -> Device {
-        let [key] = vault_keys(vault());
-        let replica = Shared::new(Replica::open(storage, key).unwrap());
-        let (engine, handle, events) = SyncEngine::new(
-            replica.clone(),
-            self.server.clone(),
-            self.timer.clone(),
-            FakeSession::new(&self.server, Duration::from_secs(900)),
-            SyncConfig {
-                jitter: false,
-                ..SyncConfig::default()
-            },
-            Box::new(|| Ok(MemoryStorage::new(vault()))),
-        );
-        self.spawner.spawn_local(engine.run()).unwrap();
-        let (ws, changes) = Workspace::open(replica, handle);
-        let mut device = Device {
-            ws,
-            changes,
-            events,
-        };
-        self.settle(&mut device);
-        device
-    }
-
-    /// Lets every engine catch up, pushing anything debounced.
-    fn sync(&mut self, devices: &mut [&mut Device]) {
-        for _ in 0..3 {
-            self.pool.run_until_stalled();
-            self.timer.advance(Duration::from_secs(5));
-            self.pool.run_until_stalled();
-            for device in devices.iter_mut() {
-                self.settle(device);
-            }
-        }
-    }
-
-    /// Passes the device's queued engine events to its workspace.
-    fn settle(&mut self, device: &mut Device) {
-        self.pool.run_until_stalled();
-        while let Ok(event) = device.events.try_recv() {
-            device.ws.apply_sync_event(&event);
-        }
-    }
-
-    fn run<T>(&mut self, future: impl Future<Output = T>) -> T {
-        self.pool.run_until(future)
-    }
+fn device_on(storage: MemoryStorage) -> Device {
+    let [key] = vault_keys(vault());
+    let replica = Shared::new(Replica::open(storage, key).unwrap());
+    let (ws, changes) = Workspace::open(replica);
+    Device { ws, changes }
 }
 
 impl Device {
@@ -126,8 +55,16 @@ impl Device {
             .collect()
     }
 
-    fn outbox(&self) -> usize {
-        self.ws.replica().lock().pending().unwrap()
+    /// How many updates are stored across every note.
+    fn stored_updates(&self) -> usize {
+        let replica = self.ws.replica().lock();
+        let store = replica.storage().unwrap();
+        store
+            .list_notes()
+            .unwrap()
+            .into_iter()
+            .map(|id| store.load_note(id).unwrap().unwrap().entries.len())
+            .sum()
     }
 
     fn body(&self, id: NoteId) -> String {
@@ -143,13 +80,12 @@ fn names(nodes: &[tags::TagNode]) -> Vec<String> {
 
 #[test]
 fn opening_rebuilds_tree_and_index() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let work = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(work, "Plan\n#work/acme plumber", T1).unwrap();
     let storage = a.ws.replica().lock().storage().unwrap().clone();
 
-    let b = sim.device_on(storage);
+    let b = device_on(storage);
     assert_eq!(names(b.ws.tree().roots()), ["work"]);
     assert_eq!(names(&b.ws.tree().roots()[0].children), ["acme"]);
     assert_eq!(b.titles(&NOTES, "plumber"), ["Plan"]);
@@ -157,8 +93,7 @@ fn opening_rebuilds_tree_and_index() {
 
 #[test]
 fn all_notes_includes_archived_and_trashed() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let kept = a.ws.create(&NOTES, T1).unwrap();
     let archived = a.ws.create(&NOTES, T1).unwrap();
     let trashed = a.ws.create(&NOTES, T1).unwrap();
@@ -173,8 +108,7 @@ fn all_notes_includes_archived_and_trashed() {
 
 #[test]
 fn local_edits_notify_with_tree_flag() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     a.drain();
     let id = a.ws.create(&NOTES, T1).unwrap();
     assert_eq!(
@@ -197,30 +131,11 @@ fn local_edits_notify_with_tree_flag() {
     assert!(!a.drain()[0].tree_changed);
 }
 
-#[test]
-fn remote_update_produces_a_notification() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
-    let mut b = sim.device();
-    let id = a.ws.create(&NOTES, T1).unwrap();
-    a.ws.set_body(id, "Shopping\n#home", T1).unwrap();
-    sim.sync(&mut [&mut a, &mut b]);
-    b.drain();
-
-    a.ws.set_body(id, "Groceries\n#home", T2).unwrap();
-    sim.sync(&mut [&mut a, &mut b]);
-    let changed = b.drain();
-    assert!(changed.iter().any(|c| c.notes.contains(&id)), "{changed:?}");
-    assert_eq!(b.titles(&NOTES, ""), ["Groceries"]);
-    assert_eq!(b.titles(&tag("home"), "groceries"), ["Groceries"]);
-}
-
 // ---- 3.2 list ----
 
 #[test]
 fn each_special_view() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let tagged = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(tagged, "Tagged #work", T1).unwrap();
     let plain = a.ws.create(&NOTES, T1).unwrap();
@@ -248,8 +163,7 @@ fn each_special_view() {
 
 #[test]
 fn parent_tag_includes_descendants_newest_first() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let parent = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(parent, "Parent #work", T1).unwrap();
     let child = a.ws.create(&NOTES, T1).unwrap();
@@ -273,8 +187,7 @@ fn parent_tag_includes_descendants_newest_first() {
 
 #[test]
 fn entries_carry_title_preview_and_flags() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let empty = a.ws.create(&NOTES, T1).unwrap();
     let full = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(
@@ -298,8 +211,7 @@ fn entries_carry_title_preview_and_flags() {
 
 #[test]
 fn long_previews_are_cut() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let id = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(id, &format!("Title\n{}", "word ".repeat(100)), T1)
         .unwrap();
@@ -310,8 +222,7 @@ fn long_previews_are_cut() {
 
 #[test]
 fn search_is_scoped_to_the_selection_and_live() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let archived = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(archived, "Old plumber sink", T1).unwrap();
     a.ws.set_archived(archived, true).unwrap();
@@ -327,12 +238,11 @@ fn search_is_scoped_to_the_selection_and_live() {
     assert!(a.titles(&NOTES, "sink").is_empty());
 }
 
-// ---- 3.3 create, flags, trash, purge ----
+// ---- 3.3 create, flags, trash, delete ----
 
 #[test]
 fn create_under_a_tag() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let seed = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(seed, "#Work/Acme", T1).unwrap();
 
@@ -352,8 +262,7 @@ fn create_under_a_tag() {
 
 #[test]
 fn create_in_notes_is_empty_and_first() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let old = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(old, "Old", T1).unwrap();
     let id = a.ws.create(&NOTES, T2).unwrap();
@@ -363,8 +272,7 @@ fn create_in_notes_is_empty_and_first() {
 
 #[test]
 fn view_membership_follows_flags() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let id = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(id, "Note #work", T1).unwrap();
     let in_view = |a: &Device, v: View| a.ws.list(&Selection::View(v), "").len();
@@ -404,13 +312,12 @@ fn view_membership_follows_flags() {
 
 #[test]
 fn trashed_notes_reject_body_changes() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let id = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(id, "Keep", T1).unwrap();
     let (session, _) = a.ws.editor_attach(id).unwrap();
     a.ws.set_trashed(id, true).unwrap();
-    let before = a.outbox();
+    let before = a.stored_updates();
 
     assert_eq!(
         a.ws.set_body(id, "Changed", T2),
@@ -422,7 +329,7 @@ fn trashed_notes_reject_body_changes() {
         Err(WorkspaceError::Trashed(id))
     );
     assert_eq!(a.body(id), "Keep");
-    assert_eq!(a.outbox(), before);
+    assert_eq!(a.stored_updates(), before);
 
     a.ws.set_trashed(id, false).unwrap();
     a.ws.set_body(id, "Changed", T2).unwrap();
@@ -430,51 +337,10 @@ fn trashed_notes_reject_body_changes() {
 }
 
 #[test]
-fn purge_only_trashed_notes() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
-    let mut b = sim.device();
-    let id = a.ws.create(&NOTES, T1).unwrap();
-    a.ws.set_body(id, "Doomed", T1).unwrap();
-    sim.sync(&mut [&mut a, &mut b]);
-
-    assert_eq!(a.ws.purge(id).err(), Some(WorkspaceError::NotTrashed(id)));
-
-    a.ws.set_trashed(id, true).unwrap();
-    let purge = a.ws.purge(id).unwrap();
-    sim.run(purge).unwrap();
-    a.ws.refresh(&[id]);
-    assert!(a.ws.note(id).is_none());
-    assert!(a.ws.list(&Selection::View(View::Trash), "").is_empty());
-
-    sim.sync(&mut [&mut a, &mut b]);
-    assert!(b.ws.note(id).is_none());
-    assert!(b.ws.all_notes().is_empty());
-}
-
-#[test]
-fn purge_while_offline_leaves_the_note_in_trash() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
-    let id = a.ws.create(&NOTES, T1).unwrap();
-    a.ws.set_trashed(id, true).unwrap();
-    sim.sync(&mut [&mut a]);
-
-    sim.server.set_reachable(false);
-    let purge = a.ws.purge(id).unwrap();
-    assert_eq!(
-        sim.run(purge),
-        Err(WorkspaceError::Sync(SyncError::Offline))
-    );
-    assert_eq!(a.ws.list(&Selection::View(View::Trash), "").len(), 1);
-}
-
-#[test]
-fn local_workspace_deletes_trashed_notes_with_no_engine() {
+fn delete_permanently_only_trashed_notes() {
     let [key] = vault_keys(vault());
     let replica = Shared::new(Replica::open(MemoryStorage::new(vault()), key).unwrap());
-    let (mut ws, mut changes) = Workspace::open_local(replica.clone());
-    assert!(ws.sync().is_none());
+    let (mut ws, mut changes) = Workspace::open(replica.clone());
 
     let id = ws.create(&NOTES, T1).unwrap();
     ws.set_body(id, "Doomed #old", T1).unwrap();
@@ -501,23 +367,13 @@ fn local_workspace_deletes_trashed_notes_with_no_engine() {
         replica.lock().storage().unwrap().load_note(id).unwrap(),
         None
     );
-
-    // A local workspace can't purge through an engine.
-    let other = ws.create(&NOTES, T2).unwrap();
-    ws.set_trashed(other, true).unwrap();
-    let purge = ws.purge(other).unwrap();
-    assert_eq!(
-        futures::executor::block_on(purge),
-        Err(WorkspaceError::Sync(SyncError::Stopped))
-    );
 }
 
 // ---- 3.4 rename ----
 
 #[test]
 fn rename_a_tag() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let id = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(id, "#work/acme notes", T1).unwrap();
     a.drain();
@@ -537,8 +393,7 @@ fn rename_a_tag() {
 
 #[test]
 fn rename_moves_under_a_new_parent() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let id = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(id, "for #acme", T1).unwrap();
     a.ws.rename_tag("acme", "clients/acme", T2).unwrap();
@@ -549,8 +404,7 @@ fn rename_moves_under_a_new_parent() {
 
 #[test]
 fn rename_into_an_existing_tag_merges() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let job = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(job, "one #job", T1).unwrap();
     let work = a.ws.create(&NOTES, T1).unwrap();
@@ -562,8 +416,7 @@ fn rename_into_an_existing_tag_merges() {
 
 #[test]
 fn rename_rewrites_archived_and_trashed_notes() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let archived = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(archived, "a #work", T1).unwrap();
     a.ws.set_archived(archived, true).unwrap();
@@ -578,57 +431,37 @@ fn rename_rewrites_archived_and_trashed_notes() {
 
 #[test]
 fn invalid_rename_changes_nothing() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let id = a.ws.create(&NOTES, T1).unwrap();
     a.ws.set_body(id, "#work", T1).unwrap();
-    let before = a.outbox();
+    let before = a.stored_updates();
     a.drain();
     assert_eq!(
         a.ws.rename_tag("work", "42", T2),
         Err(WorkspaceError::InvalidTagName("42".into()))
     );
     assert_eq!(a.body(id), "#work");
-    assert_eq!(a.outbox(), before);
+    assert_eq!(a.stored_updates(), before);
     assert!(a.drain().is_empty());
 }
 
 #[test]
 fn rename_queues_one_update_per_affected_note() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
+    let mut a = device();
     let mut ids = Vec::new();
     for body in ["#work one", "#work/acme two", "#home three"] {
         let id = a.ws.create(&NOTES, T1).unwrap();
         a.ws.set_body(id, body, T1).unwrap();
         ids.push(id);
     }
-    sim.sync(&mut [&mut a]);
-    assert_eq!(a.outbox(), 0);
+    let log_len = |a: &Device, id: NoteId| {
+        let replica = a.ws.replica().lock();
+        let stored = replica.storage().unwrap().load_note(id).unwrap();
+        stored.unwrap().entries.len()
+    };
+    let before: Vec<usize> = ids.iter().map(|&id| log_len(&a, id)).collect();
 
     a.ws.rename_tag("work", "job", T2).unwrap();
-    let outbox = a.ws.replica().lock().storage().unwrap().outbox().unwrap();
-    let mut notes: Vec<NoteId> = outbox.iter().map(|e| e.note).collect();
-    notes.sort();
-    let mut expected = vec![ids[0], ids[1]];
-    expected.sort();
-    assert_eq!(notes, expected);
-}
-
-// ---- reload ----
-
-#[test]
-fn reload_reports_everything() {
-    let mut sim = Sim::new();
-    let mut a = sim.device();
-    let id = a.ws.create(&NOTES, T1).unwrap();
-    a.drain();
-    a.ws.reload();
-    assert_eq!(
-        a.drain(),
-        [Changed {
-            notes: vec![id],
-            tree_changed: true
-        }]
-    );
+    let after: Vec<usize> = ids.iter().map(|&id| log_len(&a, id)).collect();
+    assert_eq!(after, [before[0] + 1, before[1] + 1, before[2]]);
 }

@@ -1,41 +1,26 @@
 //! The unlocked vault as the UI sees it: views, note and tag operations,
-//! search, and change notifications over the sync replica.
+//! search, and change notifications over the replica.
 //!
 //! [`Workspace`] owns no documents: the shared [`Replica`] holds them and
-//! performs every edit with its own storage transaction and outbox entry.
-//! The workspace adds what the UI needs on top: the tag tree, the search
-//! index, list entries, and app rules such as "trashed notes are read-only".
+//! stores every edit before it returns. The workspace adds what the UI
+//! needs on top: the tag tree, the search index, list entries, and app rules
+//! such as "trashed notes are read-only".
 //!
-//! Every change, local or remote, comes out of one [`Changed`] stream, so
-//! the UI re-queries the same way for both. Local edits produce no engine
-//! event, so the workspace reports its own; the host passes engine events to
-//! [`Workspace::apply_sync_event`] for remote ones.
+//! Every change comes out of one [`Changed`] stream, so the UI re-queries
+//! the same way whatever caused it.
 //!
 //! Like the replica, a workspace is only ever used inside synchronous calls.
-//! [`Workspace::purge`] returns a future that doesn't borrow it, so the host
-//! can await it without holding whatever lock guards the workspace.
-//!
-//! A local-only workspace ([`Workspace::open_local`]) has no engine: edits
-//! are stored by the replica as usual, and [`Workspace::delete_permanently`]
-//! removes a trashed note from the device at once.
-
-mod server_url;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::future::Future;
 
 use futures::channel::mpsc;
 
-pub use server_url::{ServerUrl, ServerUrlError};
-
 use crate::document::EditorUpdate;
 use crate::note::{Note, NoteId, Timestamp, after_title};
+use crate::replica::{EditorSessionId, Replica, ReplicaError, Shared};
 use crate::search::SearchIndex;
 use crate::storage::Storage;
-use crate::sync::{
-    EditorSessionId, Replica, ReplicaError, Shared, SyncError, SyncEvent, SyncHandle,
-};
 use crate::tags::{self, RenameError, TagPath, TagTree, View};
 
 /// What the note list shows: a special view or a tag (with its
@@ -82,9 +67,6 @@ pub enum WorkspaceError {
     /// it.
     Unrepresentable(NoteId),
     Replica(ReplicaError),
-    /// Permanent deletion failed, for example because the server can't be
-    /// reached ([`SyncError::Offline`]).
-    Sync(SyncError),
 }
 
 impl fmt::Display for WorkspaceError {
@@ -96,7 +78,6 @@ impl fmt::Display for WorkspaceError {
             Self::InvalidTagName(name) => write!(f, "invalid tag name: {name:?}"),
             Self::Unrepresentable(id) => write!(f, "tag can't be rewritten in note {id}"),
             Self::Replica(err) => err.fmt(f),
-            Self::Sync(err) => err.fmt(f),
         }
     }
 }
@@ -126,11 +107,10 @@ type Result<T> = std::result::Result<T, WorkspaceError>;
 /// Longest list preview, in characters.
 const PREVIEW_CHARS: usize = 200;
 
-/// The unlocked vault: the shared replica and its engine handle, plus the
-/// tag tree and search index derived from it.
+/// The unlocked vault: the shared replica, plus the tag tree and search
+/// index derived from it.
 pub struct Workspace<S: Storage> {
     replica: Shared<Replica<S>>,
-    sync: Option<SyncHandle>,
     tree: TagTree,
     index: SearchIndex,
     /// Each attached editor's note, to refuse edits to trashed notes.
@@ -141,27 +121,10 @@ pub struct Workspace<S: Storage> {
 impl<S: Storage> Workspace<S> {
     /// Builds the tag tree and search index from every note in `replica`.
     /// Returns the workspace and its change stream.
-    pub fn open(
-        replica: Shared<Replica<S>>,
-        sync: SyncHandle,
-    ) -> (Self, mpsc::UnboundedReceiver<Changed>) {
-        Self::open_with(replica, Some(sync))
-    }
-
-    /// Like [`open`](Self::open), with no sync engine: nothing leaves the
-    /// device.
-    pub fn open_local(replica: Shared<Replica<S>>) -> (Self, mpsc::UnboundedReceiver<Changed>) {
-        Self::open_with(replica, None)
-    }
-
-    fn open_with(
-        replica: Shared<Replica<S>>,
-        sync: Option<SyncHandle>,
-    ) -> (Self, mpsc::UnboundedReceiver<Changed>) {
+    pub fn open(replica: Shared<Replica<S>>) -> (Self, mpsc::UnboundedReceiver<Changed>) {
         let (changes, changes_rx) = mpsc::unbounded();
         let mut workspace = Self {
             replica,
-            sync,
             tree: TagTree::default(),
             index: SearchIndex::new(),
             editors: BTreeMap::new(),
@@ -173,11 +136,6 @@ impl<S: Storage> Workspace<S> {
 
     pub fn replica(&self) -> &Shared<Replica<S>> {
         &self.replica
-    }
-
-    /// The engine handle, or `None` for a local-only workspace.
-    pub fn sync(&self) -> Option<&SyncHandle> {
-        self.sync.as_ref()
     }
 
     /// The tag tree of notes that are neither archived nor trashed.
@@ -258,31 +216,7 @@ impl<S: Storage> Workspace<S> {
         Ok(())
     }
 
-    /// Starts permanently deleting a trashed note. The returned future
-    /// deletes it on the server, then locally, and needs a connection: it
-    /// fails with [`SyncError::Offline`] when there is none, and then
-    /// nothing changes. Once it succeeds, call [`refresh`](Self::refresh)
-    /// with the note's id.
-    pub fn purge(&self, id: NoteId) -> Result<impl Future<Output = Result<()>> + use<S>> {
-        match self.note(id) {
-            None => return Err(WorkspaceError::NotFound(id)),
-            Some(note) if !note.is_trashed() => return Err(WorkspaceError::NotTrashed(id)),
-            Some(_) => {}
-        }
-        let sync = self.sync.clone();
-        Ok(async move {
-            let sync = sync.ok_or(WorkspaceError::Sync(SyncError::Stopped))?;
-            sync.purge(id).await.map_err(|err| match err {
-                SyncError::NotTrashed(id) => WorkspaceError::NotTrashed(id),
-                SyncError::NoteNotFound(id) => WorkspaceError::NotFound(id),
-                err => WorkspaceError::Sync(err),
-            })
-        })
-    }
-
-    /// Permanently deletes a trashed note from this device, with no engine
-    /// involved. For a local-only workspace; one with an engine uses
-    /// [`purge`](Self::purge) so the server deletes it too.
+    /// Permanently deletes a trashed note.
     pub fn delete_permanently(&mut self, id: NoteId) -> Result<()> {
         match self.note(id) {
             None => return Err(WorkspaceError::NotFound(id)),
@@ -374,14 +308,6 @@ impl<S: Storage> Workspace<S> {
         self.replica.lock().editor_detach(session);
     }
 
-    /// Takes in an engine event: remote changes update the tree and index
-    /// and are reported like local ones.
-    pub fn apply_sync_event(&mut self, event: &SyncEvent) {
-        if let SyncEvent::NotesChanged(ids) = event {
-            self.refresh(ids);
-        }
-    }
-
     /// The replica changed `ids` (or removed them): updates the index and
     /// tree and reports the change.
     pub fn refresh(&mut self, ids: &[NoteId]) {
@@ -413,19 +339,6 @@ impl<S: Storage> Workspace<S> {
         });
     }
 
-    /// Rebuilds the tree and index from scratch, as after the replica was
-    /// rebuilt from storage, and reports every note as changed.
-    pub fn reload(&mut self) {
-        let before: BTreeSet<NoteId> = self.index_ids();
-        self.rebuild();
-        let mut ids: BTreeSet<NoteId> = self.index_ids();
-        ids.extend(before);
-        let _ = self.changes.unbounded_send(Changed {
-            notes: ids.into_iter().collect(),
-            tree_changed: true,
-        });
-    }
-
     fn rebuild(&mut self) {
         let notes = self.replica.lock().notes();
         self.index = SearchIndex::new();
@@ -433,10 +346,6 @@ impl<S: Storage> Workspace<S> {
             self.index.upsert(note.id(), note.body());
         }
         self.tree = TagTree::build(&notes);
-    }
-
-    fn index_ids(&self) -> BTreeSet<NoteId> {
-        self.replica.lock().notes().iter().map(Note::id).collect()
     }
 
     fn check_editable(&self, id: NoteId) -> Result<()> {

@@ -59,8 +59,8 @@ impl PayloadKind {
     }
 }
 
-/// The account's root key. It wraps every note key and is itself stored only
-/// inside a [`KeyBundle`](super::KeyBundle).
+/// The vault's root key. It wraps every note key and is itself stored only
+/// in the OS keychain and wrapped in a [`RecoveryEntry`](super::RecoveryEntry).
 pub struct VaultKey(pub(crate) SymmetricKey);
 
 impl VaultKey {
