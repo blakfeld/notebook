@@ -37,13 +37,12 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 - [x] `invite-codes`: invite-gated registration, per-vault storage quotas *(retired)*
 - [x] `desktop-app-shell`: Tauri desktop app with sign-in, tag sidebar, note list, editor, search
   - Linux and Windows manual checks not done.
+- [x] `local-only-desktop`: no logins; first launch creates a notebook, vault key in the keychain, recovery key shown once, upgrade path for server-backed installs, no network access
+  - Known limitation (see its `design.md`): one `vault-key` keychain slot, so a notebook set aside by Start over loses its key entry once a new notebook is created.
 
 ## Wave 1 (can start now)
 
-1. [~] `local-only-desktop`: no logins; first launch creates a notebook, vault key in the keychain, recovery key shown once, upgrade path for server-backed installs, no network access
-   - In progress (branch `worktree-hashed-waddling-pelican`, uncommitted), 12 of 15 tasks done. All code is written, reviewed (code and security, findings fixed), and passes fmt, both clippy runs, all tests, and `openspec validate --strict`. Left, all manual and needing a person at the desktop: 3.7 (no CSP violations under `cargo tauri dev`), 5.1 (README flow works as written), 5.2 (end to end: fresh install, relaunch, no outbound connections in a network monitor, and upgrading a copy of a real signed-in data directory).
-   - Needs: nothing outstanding. **Critical path**: wave 2 waits on it.
-2. [~] `vault-backup`, **core part** (tasks groups 1–3): backup file format, encryption, `import_note`, atomic writer, retention
+1. [~] `vault-backup`, **core part** (tasks groups 1–3): backup file format, encryption, `import_note`, atomic writer, retention
    - In progress (branch `worktree-foamy-mapping-catmull`). `RecoveryEntry` is copied verbatim from the in-progress
      `local-only-desktop` worktree (`crypto/recovery_entry.rs` plus small visibility changes in `bundle.rs`, `recovery.rs`, `mod.rs`)
      so the two branches merge cleanly.
@@ -61,7 +60,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
      same folder, each one's retention prunes the other's backups.
    - Needs: only `RecoveryEntry` from `local-only-desktop` task 1.1, which is small; land that first or stub it.
    - The app part is in wave 2. Keep it as one change; groups 4–6 wait for `local-only-desktop`.
-3. [~] `editor-live-preview`: hidden syntax, typography, themes, focus mode, source view
+2. [~] `editor-live-preview`: hidden syntax, typography, themes, focus mode, source view
    - In progress, 20 of 26 tasks done. Implementation from `origin/worktree-mellow-bubbling-swing` (`31cd30c`)
      brought onto post-pivot main (uncommitted in `worktree-warm-wiggling-pearl`), touch-tap link opening removed,
      code-reviewed and review findings fixed; fmt, clippy, and web checks pass.
@@ -69,7 +68,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
      real-webview typing feel; jsdom timings are in `tasks.md`), then a security-analyst pass on the opener
      capability and `set_preference`, then archive.
    - Needs: nothing outstanding. Updated for the pivot: no touch tap, no remote-edit requirement, no browser checks.
-4. [ ] `markdown-export`: export all notes as markdown into a chosen folder
+3. [ ] `markdown-export`: export all notes as markdown into a chosen folder
    - Needs: nothing outstanding. Updated for the pivot: zip/browser output removed.
    - Shares `tauri-plugin-dialog` and the `YYYYMMDD-HHMMSS` stamp formatter with `vault-backup`; whichever lands first adds them.
      The stamp formatter now exists as `notebook_core::time::stamp` (on the `vault-backup` branch); reuse it.
@@ -81,9 +80,9 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 ## Wave 2
 
 1. [ ] `vault-backup`, **app part** (task groups 4–6): scheduler, Back up now, Settings section, welcome-screen and settings restore, sidebar notice
-   - Needs: `local-only-desktop` (welcome screen, phases, recovery entry).
+   - Needs: nothing outstanding (`local-only-desktop` is archived).
 2. [ ] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
-   - Needs: `local-only-desktop`.
+   - Needs: nothing outstanding (`local-only-desktop` is archived).
    - Archive after `vault-backup`, so users can take a backup before the storage schema upgrade drops sync data.
 
 > **Milestone: safe local-only app.** Encrypted backups land in Dropbox (or any

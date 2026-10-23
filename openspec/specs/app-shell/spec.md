@@ -6,174 +6,23 @@ Defines the Notebook client application experience shared by desktop, browser, a
 
 ## Requirements
 
-### Requirement: Server address
-Sign-in, registration, and recovery SHALL take the server's address from the user. The app SHALL accept only `https` addresses, except `http` addresses whose host is a loopback address or `localhost`. Any other address SHALL be rejected before contacting a server, with a message naming the problem.
-
-#### Scenario: HTTPS address accepted
-- **WHEN** the user enters `https://notes.example.com` as the server
-- **THEN** the app accepts the address and contacts that server
-
-#### Scenario: Plain HTTP to a remote host rejected
-- **WHEN** the user enters `http://notes.example.com` as the server
-- **THEN** the app rejects it without making any network request and says HTTPS is required
-
-#### Scenario: Plain HTTP to loopback accepted
-- **WHEN** the user enters `http://127.0.0.1:8080` as the server
-- **THEN** the app accepts the address
-
-### Requirement: Sign in
-A signed-out user SHALL be able to sign in with server address, username, and passphrase. On success the app SHALL unwrap the vault key locally, load the vault, and show the main layout. The passphrase SHALL NOT be sent to the server or stored anywhere.
-
-#### Scenario: Successful sign-in
-- **WHEN** a signed-out user enters a valid server, username, and passphrase
-- **THEN** the app shows the main layout with that account's notes
-
-#### Scenario: Sign-in on a fresh install downloads the vault
-- **WHEN** a user signs in on a device that has never held their vault and the vault has notes
-- **THEN** every note appears in the note list once the initial sync completes
-
-### Requirement: Sign-in failures are generic
-When sign-in fails because the username is unknown or the passphrase is wrong, the app SHALL show the same message in both cases. A network failure or rate limiting SHALL be reported as such, distinct from bad credentials.
-
-#### Scenario: Unknown user and wrong passphrase look the same
-- **WHEN** one sign-in uses an unknown username and another uses a known username with the wrong passphrase
-- **THEN** both show the same "username or passphrase is incorrect" message
-
-#### Scenario: Server unreachable
-- **WHEN** the user signs in while the server cannot be reached
-- **THEN** the app says the server could not be reached rather than that the credentials are wrong
-
-### Requirement: Registration with an invite code
-A signed-out user SHALL be able to register with server address, username, passphrase entered twice, and an invite code. The app SHALL reject a passphrase shorter than 12 characters or entries that do not match before contacting the server, and SHALL show the server's reason when it refuses the invite code or username.
-
-#### Scenario: Mismatched passphrases
-- **WHEN** the two passphrase entries differ
-- **THEN** the app refuses to continue and no request is sent
-
-#### Scenario: Invite code refused
-- **WHEN** the server rejects the invite code as invalid, used, or expired
-- **THEN** the app shows that the invite code was not accepted and no account is created
-
-#### Scenario: Username taken
-- **WHEN** the server refuses the username as unavailable
-- **THEN** the app asks for a different username and keeps the other entries
-
-#### Scenario: Successful registration
-- **WHEN** registration completes
-- **THEN** the user is signed in to an empty vault and sees the main layout
-
 ### Requirement: Recovery key is shown once and acknowledged
-During registration the app SHALL generate the recovery key on the device and show it before the account is created. The user SHALL explicitly confirm they have saved it before registration proceeds. The app SHALL NOT store the recovery key or offer to show it again later.
+When a notebook is created, the app SHALL generate the recovery key on the device and show it. It SHALL explain that the key is needed to open a backup on another computer or after the secure store is lost. The user SHALL confirm they have saved it before the notebook opens. The app SHALL NOT store the recovery key or offer to show it again later.
 
 #### Scenario: Acknowledgment required
 - **WHEN** the recovery key is shown and the user has not confirmed saving it
-- **THEN** the app does not let registration continue
+- **THEN** the app does not open the notebook
 
 #### Scenario: Recovery key never redisplayed
-- **WHEN** registration has finished
+- **WHEN** notebook creation has finished
 - **THEN** no screen in the app shows the recovery key again
 
-### Requirement: Account recovery with the recovery key
-A signed-out user SHALL be able to recover an account with server address, username, recovery key, and a new passphrase entered twice. On success the new passphrase replaces the old one and the user is signed in with all notes intact. A malformed recovery key SHALL be reported as mistyped, distinct from a key that does not unlock the account.
-
-#### Scenario: Successful recovery
-- **WHEN** the user enters the correct recovery key and a new passphrase
-- **THEN** the user is signed in, all notes are present, and the new passphrase signs in from then on
-
-#### Scenario: Typo in recovery key
-- **WHEN** the entered recovery key fails its checksum
-- **THEN** the app says the key looks mistyped without contacting the server
-
-### Requirement: Passphrase change
-A signed-in user SHALL be able to change their passphrase from settings by entering the current passphrase and the new one twice, subject to the registration length rule. The change SHALL require a server connection. Afterwards the old passphrase SHALL no longer sign in or unlock this device.
-
-#### Scenario: Passphrase changed
-- **WHEN** the user changes their passphrase while online
-- **THEN** signing in with the new passphrase works and with the old one fails
-
-#### Scenario: Wrong current passphrase
-- **WHEN** the current passphrase entered is wrong
-- **THEN** the change is refused and the old passphrase still works
-
-#### Scenario: Offline change refused
-- **WHEN** the user tries to change the passphrase while the server is unreachable
-- **THEN** the app says a connection is required and nothing changes
-
-### Requirement: Sign out
-Signing out SHALL revoke this device's session on the server when reachable, remove every stored credential, delete the device's local copy of the vault, and return to the sign-in screen. If unsynced local changes exist, the app SHALL show how many and require confirmation, since they would be lost.
-
-#### Scenario: Sign out with everything synced
-- **WHEN** the user signs out with no pending changes
-- **THEN** the app returns to sign-in, and a relaunch shows the sign-in screen with no notes on the device
-
-#### Scenario: Sign out with pending changes
-- **WHEN** the user signs out with 3 unsynced changes
-- **THEN** the app warns that 3 changes will be lost and signs out only if the user confirms
-
 ### Requirement: Credentials in the OS secure store
-On native platforms, the session's refresh token and the key material needed to unlock the vault SHALL be stored only in the operating system's secure credential store. They SHALL NOT be written to plain files, the local database, logs, or web storage.
+On native platforms, the vault key SHALL be stored only in the operating system's secure credential store. It SHALL NOT be written to plain files, the local database, logs, or web storage. The recovery entry MAY be stored in the local database, since it opens only with the recovery key.
 
 #### Scenario: Nothing secret in app files
-- **WHEN** the app's data directory is inspected after sign-in
-- **THEN** it contains no refresh token, vault key, or note key in usable form
-
-### Requirement: Unlock on launch
-On native platforms, when the app starts with valid stored credentials and was not locked, it SHALL open the vault without asking for the passphrase, including while offline.
-
-#### Scenario: Relaunch while signed in
-- **WHEN** a signed-in user quits and relaunches the app
-- **THEN** the main layout appears without a passphrase prompt
-
-#### Scenario: Relaunch offline
-- **WHEN** a signed-in user relaunches the app with no network
-- **THEN** the main layout appears with all local notes and the sync indicator shows offline
-
-### Requirement: No secure store available
-When the operating system's secure credential store is unavailable, the app SHALL still allow signing in but SHALL NOT persist credentials, SHALL tell the user they will need to sign in each launch, and SHALL NOT fall back to storing secrets in a file.
-
-#### Scenario: Secret Service missing on Linux
-- **WHEN** the user signs in on a system with no secure credential store
-- **THEN** the session works, a notice explains credentials are not remembered, and the next launch shows the sign-in screen
-
-### Requirement: Lock
-A signed-in user SHALL be able to lock the app. Locking SHALL discard all decrypted note content and keys from memory, hide all note content, stop sync, and require the passphrase to unlock. The locked state SHALL persist across relaunches.
-
-#### Scenario: Lock hides notes
-- **WHEN** the user locks the app
-- **THEN** the unlock screen is shown and no note titles or content are visible
-
-#### Scenario: Locked app relaunches locked
-- **WHEN** a locked app is quit and relaunched
-- **THEN** it shows the unlock screen rather than the notes
-
-### Requirement: Unlock with the passphrase
-A locked app SHALL unlock when the user enters their current passphrase, whether or not the server is reachable. A wrong passphrase SHALL leave the app locked.
-
-#### Scenario: Unlock online
-- **WHEN** the user enters the correct passphrase on the unlock screen while online
-- **THEN** the main layout reappears and sync resumes
-
-#### Scenario: Unlock offline
-- **WHEN** the user enters the correct passphrase while the server is unreachable
-- **THEN** the main layout reappears with all local notes
-
-#### Scenario: Wrong passphrase
-- **WHEN** the user enters a wrong passphrase on the unlock screen
-- **THEN** the app stays locked and says the passphrase is incorrect
-
-### Requirement: Passphrase changed on another device
-Once a device learns that the account's passphrase was changed elsewhere, the old passphrase SHALL no longer unlock that device. The next unlock SHALL require the new passphrase and a server connection.
-
-#### Scenario: Old passphrase stops working locally
-- **WHEN** the passphrase is changed on device A and device B syncs and is then locked
-- **THEN** device B does not unlock with the old passphrase and unlocks with the new one when online
-
-### Requirement: Session expiry
-When the session can no longer be refreshed, the app SHALL keep the vault open and keep accepting edits locally, show that sign-in is required for sync, and resume syncing pending changes after the user re-enters their passphrase.
-
-#### Scenario: Revoked session
-- **WHEN** this device's session is revoked on the server while the app is open
-- **THEN** the sync indicator says sign-in is required, local edits continue to save, and after re-entering the passphrase the pending edits sync
+- **WHEN** the app's data directory is inspected after a notebook is created
+- **THEN** it contains no vault key, note key, or recovery key in usable form
 
 ### Requirement: Decrypted data stays in memory
 Note content, titles, tags, and the search index SHALL exist in decrypted form only in memory. Data written to the device's disk SHALL be ciphertext or non-sensitive settings, and logs SHALL NOT contain note content, keys, tokens, passphrases, or recovery keys.
@@ -221,17 +70,6 @@ The note list SHALL show the notes of the current selection ordered by updated t
 #### Scenario: Untitled note
 - **WHEN** a note's body is empty
 - **THEN** its entry shows the title "Untitled"
-
-### Requirement: Live updates of sidebar and list
-The sidebar, note list, and open editor SHALL reflect local and remote changes without a manual refresh: new, edited, retagged, moved between views, and deleted notes SHALL appear, move, or disappear as soon as the change is applied.
-
-#### Scenario: Remote edit appears
-- **WHEN** another device edits a note's title while it is listed on this device
-- **THEN** the entry's title updates and the note moves to the top of the list
-
-#### Scenario: New tag appears
-- **WHEN** the user types `#ideas` into a note on this device
-- **THEN** `ideas` appears in the sidebar tag tree
 
 ### Requirement: Editor pane
 Selecting a note in the list SHALL open it in the editor pane using the note editor. When no note is selected, the editor pane SHALL show an empty state. Edits made in the editor SHALL be saved automatically with no save action.
@@ -284,22 +122,22 @@ A trashed note SHALL open read-only in the editor, with an action to restore it.
 - **THEN** the body does not change
 
 ### Requirement: Delete permanently
-The user SHALL be able to permanently delete a note only from Trash, after confirming. Permanent deletion SHALL require a server connection: the note SHALL be deleted on the server first, then disappear from every view on this device, and from the user's other devices once they sync. When the server cannot be reached, the app SHALL say a connection is required and the note SHALL stay in Trash.
+The user SHALL be able to permanently delete a note only from Trash, after confirming. Permanent deletion SHALL remove the note from the device at once, with no network needed. Backups taken earlier still contain it.
 
 #### Scenario: Permanent delete
 - **WHEN** the user permanently deletes a trashed note and confirms
-- **THEN** it disappears from Trash and does not reappear after other devices sync
+- **THEN** it disappears from Trash and does not reappear after a relaunch
 
 #### Scenario: Cancelled delete
 - **WHEN** the user cancels the confirmation
 - **THEN** the note stays in Trash
 
 #### Scenario: Delete while offline
-- **WHEN** the user permanently deletes a trashed note while the server is unreachable
-- **THEN** the app says a connection is required and the note stays in Trash
+- **WHEN** the user permanently deletes a trashed note with no network connection
+- **THEN** the note is deleted at once, exactly as it would be online
 
 ### Requirement: Rename and move a tag
-The user SHALL be able to rename a tag from the sidebar, entering a full tag path so a rename can also move it under another parent. Every note carrying the tag or its descendants, including archived and trashed notes, SHALL be rewritten, and the changes SHALL sync like any edit.
+The user SHALL be able to rename a tag from the sidebar, entering a full tag path so a rename can also move it under another parent. Every note carrying the tag or its descendants, including archived and trashed notes, SHALL be rewritten as ordinary edits.
 
 #### Scenario: Rename
 - **WHEN** the user renames `work` to `job` and a note's body is `#work/acme notes`
@@ -339,46 +177,97 @@ The user SHALL be able to search the notes in the current sidebar selection. The
 - **WHEN** a search is active and the user edits a listed note so it no longer matches
 - **THEN** the note leaves the results
 
-### Requirement: Sync status indicator
-The app SHALL always show the sync state (synced, syncing, or offline), the number of local changes not yet acknowledged by the server when it is greater than zero, and any condition needing the user: sign-in required, upgrade required, or storage full.
-
-#### Scenario: Offline with pending edits
-- **WHEN** the device is offline and the user has made 2 edits
-- **THEN** the indicator shows offline and 2 pending changes
-
-#### Scenario: Back online
-- **WHEN** the connection returns and the pending changes are acknowledged
-- **THEN** the indicator shows synced with no pending count
-
-#### Scenario: Upgrade required
-- **WHEN** a remote change arrives in a document format this app version does not support
-- **THEN** the indicator says an app upgrade is required, and other notes keep syncing
-
-#### Scenario: Storage full
-- **WHEN** the server refuses local changes because the vault's storage quota is full
-- **THEN** the indicator says storage is full, the refused changes stay pending and are counted, and remote changes still arrive
-
 ### Requirement: Offline editing is durable
-Every note operation except permanent deletion SHALL work offline. Changes made offline SHALL survive quitting and relaunching the app and SHALL sync when the server becomes reachable again.
+Every note operation SHALL work with no network connection. Every change SHALL survive quitting and relaunching the app, and a change reported as saved SHALL survive a crash.
 
 #### Scenario: Offline edit survives restart
-- **WHEN** the user edits a note offline, quits, relaunches, and later goes online
-- **THEN** the edit is present after relaunch and reaches the user's other devices once online
-
-### Requirement: Settings
-The app SHALL provide a settings screen that includes the server address, username, and sign-in status of this device, and actions to toggle vim mode, change the passphrase, lock, and sign out. The screen SHALL be organized in sections so other capabilities can add their own settings alongside these.
-
-#### Scenario: Account information
-- **WHEN** a signed-in user opens settings
-- **THEN** the server address and username are shown along with the vim mode, change passphrase, lock, and sign-out actions
+- **WHEN** the user edits a note with no network connection, quits, and relaunches
+- **THEN** the edit is present after relaunch
 
 ### Requirement: Vim mode setting
-The vim mode toggle SHALL apply to the open editor immediately and SHALL be stored per device, defaulting to off. Changing it on one device SHALL NOT change it on another.
+The vim mode toggle SHALL apply to the open editor immediately and SHALL be stored on the device, defaulting to off.
 
 #### Scenario: Toggle applies immediately
 - **WHEN** the user turns vim mode on while a note is open
 - **THEN** the open editor accepts vim commands without reopening the note
 
 #### Scenario: Per-device
-- **WHEN** vim mode is turned on on one device
-- **THEN** it remains off on the user's other devices
+- **WHEN** vim mode is turned on
+- **THEN** the setting is stored only on this device and is not part of the vault or its backups
+
+#### Scenario: Remembered across launches
+- **WHEN** vim mode is turned on and the app is relaunched
+- **THEN** vim mode is still on
+
+### Requirement: First launch creates a notebook
+When the app starts with no local vault, it SHALL show a welcome screen that offers to create a new notebook. Creating one SHALL generate a new vault ID, vault key, and recovery key on the device, with no account, username, passphrase, or network request.
+
+#### Scenario: Create a notebook
+- **WHEN** a user launches the app for the first time and chooses to create a notebook
+- **THEN** after the recovery key is acknowledged, the main layout appears with an empty Notes view
+
+#### Scenario: No network needed
+- **WHEN** the first launch happens with no network connection
+- **THEN** the notebook is created exactly as it would be online
+
+### Requirement: Open on launch
+On every launch after the first, when the vault key is in the OS secure credential store, the app SHALL open the vault and show the main layout without any prompt.
+
+#### Scenario: Relaunch
+- **WHEN** the user quits and relaunches the app
+- **THEN** the main layout appears with all notes and no prompt
+
+### Requirement: Recovery key entry without a secure store
+When the operating system's secure credential store is unavailable, the app SHALL still create and open notebooks. It SHALL NOT persist the vault key. At each launch it SHALL ask for the recovery key and open the vault with it, and it SHALL say why it is asking. It SHALL NOT fall back to storing the vault key in a file.
+
+#### Scenario: Secret Service missing on Linux
+- **WHEN** the app is relaunched on a system with no secure credential store
+- **THEN** it asks for the recovery key, explains that the system has no secure store, and opens the notes once a correct key is entered
+
+#### Scenario: Wrong recovery key
+- **WHEN** a valid-looking recovery key that does not belong to this vault is entered
+- **THEN** the vault stays closed and the app says the key does not open this notebook
+
+#### Scenario: Mistyped recovery key
+- **WHEN** the entered recovery key fails its checksum
+- **THEN** the app says the key looks mistyped, distinct from a key that does not open the notebook
+
+### Requirement: Upgrade from a server-backed install
+When the app starts and finds a device previously signed in to a sync server, it SHALL convert it to a local notebook once and keep every note on the device. It SHALL obtain the vault key from the stored automatic-unlock entry, or else ask for the old passphrase and use the stored device-local unlock. It SHALL then show and require acknowledgment of a newly generated recovery key, store the vault key under the local scheme, and delete the old session and unlock entries.
+
+#### Scenario: Signed-in install upgrades silently except for the recovery key
+- **WHEN** a device that was signed in and not locked starts the new version
+- **THEN** the app shows a new recovery key to acknowledge, and then the main layout with every note that was on the device
+
+#### Scenario: Locked install asks for the old passphrase once
+- **WHEN** a device that was locked starts the new version and the user enters the old passphrase
+- **THEN** the upgrade completes and later launches do not ask for any passphrase
+
+#### Scenario: Upgrade cannot recover the key
+- **WHEN** neither entry is present, or the user cannot supply the old passphrase and chooses to start over
+- **THEN** the old database is kept beside the new one under a different name, not deleted, and a new empty notebook is created
+
+### Requirement: No network access
+The desktop app SHALL make no network requests on its own. Its content security policy SHALL permit connections only to the app itself and its host IPC channel. Opening a link in the system browser at the user's request is not a network request by the app.
+
+#### Scenario: No outbound connections
+- **WHEN** the app is used to create, edit, tag, search, and delete notes while network traffic is monitored
+- **THEN** the app makes no outbound connection
+
+### Requirement: Views update live
+The sidebar, note list, and open editor SHALL reflect changes without a manual refresh: new, edited, retagged, moved between views, and deleted notes SHALL appear, move, or disappear as soon as the change is applied.
+
+#### Scenario: Edited title moves the note
+- **WHEN** the user edits the title of a listed note that is not the most recently updated
+- **THEN** the entry's title updates and the note moves to the top of the list
+
+#### Scenario: New tag appears
+- **WHEN** the user types `#ideas` into a note on this device
+- **THEN** `ideas` appears in the sidebar tag tree
+
+### Requirement: Settings screen
+The app SHALL provide a settings screen with an action to toggle vim mode and the app's version. The screen SHALL be organized in sections so other capabilities can add their own settings alongside these.
+
+#### Scenario: Settings contents
+- **WHEN** the user opens settings
+- **THEN** the vim mode toggle and the app version are shown, and nothing refers to a server, account, passphrase, lock, or sign-out
