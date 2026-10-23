@@ -81,6 +81,46 @@ export interface ExportResult {
   path: string
 }
 
+export type BackupInterval = 'hourly' | 'daily' | 'weekly'
+
+/** The automatic backup options (`set_backup_options`). */
+export interface BackupOptions {
+  auto: boolean
+  interval: BackupInterval
+  /** How many backups to keep in the folder, at least 1. */
+  keep: number
+}
+
+/** The backup status: every backup command's result, and the event's payload. */
+export interface BackupStatus extends BackupOptions {
+  /** The backup folder, for display only (never sent back), or `null`. */
+  folder: string | null
+  /** When the last backup succeeded, if one has. */
+  last: number | null
+  /**
+   * When the next automatic backup is due: `last` + the interval when a
+   * folder is set and auto is on, otherwise `null`.
+   */
+  next_due: number | null
+  /** Notes changed since the last successful backup. */
+  changed: boolean
+  /** Why the most recent attempt failed, or `null` if it didn't. */
+  last_error: string | null
+  /** The most recent attempt failed (a folder is set). */
+  failing: boolean
+  /** Auto is on, notes changed, and none succeeded for 2 intervals. */
+  overdue: boolean
+  /** A backup is being written right now. */
+  running: boolean
+}
+
+/** The `pick_backup` result: the backup file the user picked. */
+export interface PickedBackup {
+  file_name: string
+  /** A backup of the open notebook, so no recovery key is needed. */
+  same_vault: boolean
+}
+
 /** The `editor_open` result. */
 export interface EditorOpened {
   session: number
@@ -100,12 +140,14 @@ export interface CoreEvents {
   'app-phase-changed': Phase
   'vault-changed': VaultChanged
   'editor-remote-update': EditorRemoteUpdate
+  'backup-status-changed': BackupStatus
 }
 
 /** The stable error codes (`Code` in `error.rs`). */
 export type ErrorCode =
   | 'recovery_key_malformed'
   | 'recovery_key_wrong'
+  | 'recovery_key_required'
   | 'wrong_passphrase'
   | 'invalid_tag_name'
   | 'trashed'
@@ -113,6 +155,12 @@ export type ErrorCode =
   | 'not_open'
   | 'not_found'
   | 'export_failed'
+  | 'backup_failed'
+  | 'backup_no_folder'
+  | 'backup_not_a_backup'
+  | 'backup_too_new'
+  | 'backup_damaged'
+  | 'safety_backup_failed'
   | 'internal'
 
 /**

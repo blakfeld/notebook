@@ -111,6 +111,7 @@ The adapter gains `chooseBackupFolder()`, `backupNow()`, `backupStatus()`, `setB
 - [Sync client uploads while the app is renaming or pruning] → Each file is written once and never modified, so the worst case is a deleted file being re-uploaded and then pruned again.
 - [Backups only while running] → Users who rarely open the app back up rarely, but they also change little. Overdue only counts when dirty.
 - [Whole vault in memory twice during build] → Fine at personal scale. Revisit with attachments.
+- [A compromised webview lowers the keep count to 1 and backs up, pruning older backups] → Accepted. It needs script running in the webview, which could already delete notes, and the CSP and markdown rendering guard against that. The webview never names a path, so it can't touch any other file. A picked backup is forgotten on cancel and when the notebook changes, so the webview can't restore it later unprompted.
 - [The folder path in device-local settings reveals the user's home path] → Non-sensitive by the settings rule, and never synced or logged beyond the file name.
 
 ## Migration Plan

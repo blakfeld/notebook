@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../../App.svelte'
 import '../../editor/testing'
 import type { Phase } from '../../platform'
@@ -51,6 +51,11 @@ const titles = (root: HTMLElement) =>
     el.textContent!.trim(),
   )
 
+async function selectView(root: HTMLElement, label: string) {
+  click(button(root.querySelector('nav')!, label))
+  await settle()
+}
+
 async function acknowledge(root: HTMLElement) {
   check(field(root, ACK))
   click(button(root, 'Open notebook'))
@@ -81,7 +86,10 @@ describe('first launch creates a notebook', () => {
     expect(inShell(root)).toBe(true)
     const setupCalls = core.calls
       .map((c) => c.method)
-      .filter((m) => !['listNotes', 'tagTree', 'getSettings'].includes(m))
+      .filter(
+        (m) =>
+          !['listNotes', 'tagTree', 'getSettings', 'backupStatus'].includes(m),
+      )
     // `pendingRecoveryKey` shows up when the phase event beats the
     // `createNotebook` result, as it does with the fake.
     expect(setupCalls.filter((m) => m !== 'pendingRecoveryKey')).toEqual([
@@ -91,11 +99,115 @@ describe('first launch creates a notebook', () => {
     ])
   })
 
-  it('leaves a place for the restore button', async () => {
-    // `vault-backup` fills the `restore` slot; until then nothing shows.
+  it('offers restoring from a backup beside creating a notebook', async () => {
     const { root } = await app()
     expect(hasButton(root, 'Create a notebook')).toBe(true)
-    expect(root.querySelectorAll('button')).toHaveLength(1)
+    expect(hasButton(root, 'Restore from backup')).toBe(true)
+    expect(root.querySelectorAll('button')).toHaveLength(2)
+  })
+})
+
+describe('restore from backup on first launch', () => {
+  const BACKUP = {
+    file_name: 'notebook-backup-20261022-140309.nbbackup',
+    same_vault: false,
+    notes: [
+      { id: 'a', body: '# Groceries' },
+      { id: 'b', body: '# Trip plan' },
+      { id: 'c', body: '# Old', archived: true },
+    ],
+  }
+
+  async function picked() {
+    const opened = await app()
+    opened.core.backupFile = BACKUP
+    click(button(opened.root, 'Restore from backup'))
+    await settle()
+    return opened
+  }
+
+  function enter(root: HTMLElement, key: string) {
+    fill(field(root, 'Recovery key'), key)
+    click(button(root, 'Restore'))
+  }
+
+  it('New computer: restores the backup with the recovery key and shows its notes', async () => {
+    const { core, root } = await picked()
+    expect(text(root)).toContain(BACKUP.file_name)
+    enter(root, core.recoveryKey.toLowerCase())
+    await settle()
+    expect(core.callsTo('restoreBackup')).toEqual([
+      [
+        {
+          recoveryKey: core.recoveryKey.toLowerCase(),
+          skipSafetyBackup: false,
+        },
+      ],
+    ])
+    expect(inShell(root)).toBe(true)
+    expect(titles(root).sort()).toEqual(['Groceries', 'Trip plan'])
+    await selectView(root, 'Archive')
+    expect(titles(root)).toEqual(['Old'])
+  })
+
+  it('Cancelled picker: the welcome screen stays as it was, with no error', async () => {
+    const { core, root } = await app()
+    const before = root.innerHTML
+    click(button(root, 'Restore from backup'))
+    await settle()
+    expect(core.callsTo('pickBackup')).toHaveLength(1)
+    expect(root.innerHTML).toBe(before)
+    expect(alerts(root)).toEqual([])
+    expect(core.callsTo('restoreBackup')).toEqual([])
+  })
+
+  it('says a mistyped key looks mistyped, and a wrong one doesn’t open the backup', async () => {
+    const { core, root } = await picked()
+    enter(root, 'ABCD-EFGH')
+    await settle()
+    expect(alerts(root)).toEqual([
+      'That recovery key looks mistyped. Check each group and try again.',
+    ])
+    expect(field(root, 'Recovery key').getAttribute('aria-invalid')).toBe(
+      'true',
+    )
+    enter(root, 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ-ZZZZ')
+    await settle()
+    expect(alerts(root)).toEqual([
+      'That recovery key doesn’t open this backup.',
+    ])
+    expect(inShell(root)).toBe(false)
+    expect(core.phase.phase).toBe('setup')
+    // The right key still works afterwards.
+    enter(root, core.recoveryKey)
+    await settle()
+    expect(inShell(root)).toBe(true)
+  })
+
+  it('explains a file that isn’t a backup', async () => {
+    const { core, root } = await app()
+    core.failNext('pickBackup', 'backup_not_a_backup')
+    click(button(root, 'Restore from backup'))
+    await settle()
+    expect(alerts(root)).toEqual(['That file isn’t a Notebook backup.'])
+    expect(root.querySelector('input')).toBeNull()
+  })
+
+  it('goes back to the welcome screen on Cancel', async () => {
+    const { core, root } = await picked()
+    click(button(root, 'Cancel'))
+    expect(root.querySelector('input')).toBeNull()
+    expect(hasButton(root, 'Restore from backup')).toBe(true)
+    expect(core.callsTo('restoreBackup')).toEqual([])
+  })
+
+  it('shows progress while restoring', async () => {
+    const { core, root } = await picked()
+    core.latency = 20
+    enter(root, core.recoveryKey)
+    await settle()
+    expect(button(root, 'Restoring…').disabled).toBe(true)
+    await vi.waitFor(() => expect(inShell(root)).toBe(true))
   })
 })
 

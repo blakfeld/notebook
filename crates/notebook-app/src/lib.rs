@@ -3,6 +3,7 @@
 //! The webview is a view: keys, decrypted notes, and storage all live here,
 //! in [`state::AppState`]. Nothing here uses the network.
 
+mod backup;
 mod commands;
 mod credentials;
 mod dto;
@@ -53,6 +54,13 @@ fn register<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::set_vim_mode,
         commands::set_preference,
         commands::set_tag_expanded,
+        commands::backup_status,
+        commands::choose_backup_folder,
+        commands::set_backup_options,
+        commands::backup_now,
+        commands::pick_backup,
+        commands::cancel_restore,
+        commands::restore_backup,
     ])
 }
 
@@ -91,12 +99,19 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let creds = Arc::new(KeyringStore::new(&install_id(&data_dir)?));
-            let config = AppConfig { data_dir };
+            let config = AppConfig {
+                data_dir,
+                backup_schedule: true,
+            };
             let emitter = Arc::new(TauriEmitter(app.handle().clone()));
             app.manage(AppState::launch(config, creds, emitter));
             // Mobile exports through the share sheet (`mobile-app`).
             #[cfg(desktop)]
             app.manage(export::Picker(Arc::new(export::DialogPicker(
+                app.handle().clone(),
+            ))));
+            #[cfg(desktop)]
+            app.manage(backup::Pickers(Arc::new(backup::DialogPicker(
                 app.handle().clone(),
             ))));
             Ok(())
@@ -251,6 +266,15 @@ pub(crate) mod tests {
         }
     }
 
+    /// An export folder picker that is always cancelled.
+    pub(crate) struct NoFolder;
+
+    impl FolderPicker for NoFolder {
+        fn pick(&self) -> BoxFuture<'static, Option<PathBuf>> {
+            Box::pin(std::future::ready(None))
+        }
+    }
+
     /// A mock app managing `state`, and its main webview. Its folder picker
     /// is always cancelled.
     pub(crate) fn mock_app(
@@ -263,9 +287,23 @@ pub(crate) mod tests {
         state: AppState,
         picker: Arc<StubPicker>,
     ) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
+        mock_app_with_pickers(
+            state,
+            picker,
+            Arc::new(backup::tests::StubPickers::default()),
+        )
+    }
+
+    /// A mock app managing `state`, with these export and backup pickers.
+    pub(crate) fn mock_app_with_pickers(
+        state: AppState,
+        export: Arc<dyn FolderPicker>,
+        backup: Arc<dyn backup::BackupPicker>,
+    ) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
         let app = register(mock_builder())
             .manage(state)
-            .manage(Picker(picker))
+            .manage(Picker(export))
+            .manage(backup::Pickers(backup))
             .build(mock_context(noop_assets()))
             .expect("mock app builds");
         let webview = WebviewWindowBuilder::new(&app, "main", Default::default())

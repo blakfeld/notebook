@@ -6,6 +6,7 @@ use notebook_core::tags::{TagNode, TagPath, View};
 use notebook_core::workspace::{Changed, ListEntry, Selection};
 use serde::{Deserialize, Serialize};
 
+pub use crate::backup::Interval;
 use crate::error::{AppError, AppResult, Code};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -134,6 +135,38 @@ pub struct ExportResultDto {
     pub count: usize,
     /// The export folder that was written.
     pub path: String,
+}
+
+/// The backup settings and status: the `backup_status` result and the
+/// `backup-status-changed` payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BackupStatusDto {
+    /// The backup folder, for display only; it is never sent back.
+    pub folder: Option<String>,
+    pub auto: bool,
+    pub interval: Interval,
+    pub keep: usize,
+    /// The last successful backup.
+    pub last: Option<i64>,
+    /// When the next automatic backup is due, if notes have changed by then.
+    pub next_due: Option<i64>,
+    /// Notes changed since the last successful backup.
+    pub changed: bool,
+    /// Why the most recent attempt failed, if it did.
+    pub last_error: Option<String>,
+    pub failing: bool,
+    pub overdue: bool,
+    /// A backup is being written right now.
+    pub running: bool,
+}
+
+/// The `pick_backup` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PickedBackupDto {
+    pub file_name: String,
+    /// A backup of the open notebook, which restores without the recovery
+    /// key.
+    pub same_vault: bool,
 }
 
 /// The `vault-changed` payload: ids only; the frontend re-queries.

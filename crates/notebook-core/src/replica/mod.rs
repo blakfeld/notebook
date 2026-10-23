@@ -6,6 +6,7 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+use crate::backup::BackupNote;
 use crate::crypto::{CryptoError, NoteKey, VaultId, VaultKey, fill_random};
 use crate::document::{DocumentError, EditorSync, EditorUpdate, EncryptedUpdate, NoteDocument};
 use crate::note::{Note, NoteId, Timestamp};
@@ -72,6 +73,7 @@ struct EditorSession {
 /// One open note.
 struct Open {
     doc: NoteDocument,
+    wrapped_key: Vec<u8>,
     /// Log entries since the base, counted at open and on every append.
     entries: usize,
     /// Compact once `entries` exceeds this; `None` uses the threshold. Set
@@ -148,6 +150,7 @@ impl<S: Storage> Replica<S> {
             id,
             Open {
                 doc,
+                wrapped_key,
                 entries: 1,
                 trigger: None,
                 unapplied: false,
@@ -260,6 +263,24 @@ impl<S: Storage> Replica<S> {
         let sealed = self.vault_key.seal_setting(self.vault, value)?;
         let encoded = base64::engine::general_purpose::STANDARD.encode(sealed);
         Ok(self.storage.set_setting(key, &encoded)?)
+    }
+
+    /// Every readable note as a backup holds it: its wrapped key and a
+    /// snapshot of its current state, in ID order. Notes with no readable
+    /// state (see [`notes`](Self::notes)) are left out, since a backup
+    /// can only restore notes that load.
+    pub fn backup_notes(&self) -> Result<Vec<BackupNote>, ReplicaError> {
+        self.notes
+            .iter()
+            .filter(|(_, open)| open.doc.note().is_some())
+            .map(|(id, open)| {
+                Ok(BackupNote {
+                    id: *id,
+                    wrapped_key: open.wrapped_key.clone(),
+                    snapshot: open.doc.snapshot()?,
+                })
+            })
+            .collect()
     }
 
     /// Read access to the underlying store (for export and diagnostics).
@@ -406,6 +427,7 @@ fn build(vault: VaultId, vault_key: &VaultKey, id: NoteId, stored: &StoredNote) 
     }
     Some(Open {
         doc,
+        wrapped_key: stored.wrapped_key.clone(),
         entries: stored.entries.len(),
         trigger: None,
         unapplied,
@@ -534,6 +556,32 @@ mod tests {
 
     fn stored(r: &Replica<impl Storage>, id: NoteId) -> StoredNote {
         r.storage().unwrap().load_note(id).unwrap().unwrap()
+    }
+
+    /// Backup notes import into an empty store and reopen as the same notes.
+    #[test]
+    fn backup_notes_import_as_the_same_notes() {
+        let mut a = replica();
+        let first = a.create_note("first", T1).unwrap();
+        let second = a.create_note("second", T1).unwrap();
+        a.set_body(second, "second, edited", T2).unwrap();
+        a.set_trashed(first, true).unwrap();
+
+        let notes = a.backup_notes().unwrap();
+        assert_eq!(
+            notes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            [first.min(second), first.max(second)]
+        );
+        let mut store = MemoryStorage::new(vault());
+        for note in &notes {
+            store
+                .import_note(note.id, &note.wrapped_key, note.snapshot.as_bytes())
+                .unwrap();
+        }
+        let [key] = vault_keys(vault());
+        let restored = Replica::open(store, key).unwrap();
+        assert_eq!(restored.notes(), a.notes());
+        assert!(restored.note(first).unwrap().is_trashed());
     }
 
     #[test]

@@ -57,6 +57,65 @@ describe('tauriCore', () => {
     ).resolves.toBeNull()
   })
 
+  it('sends the backup commands with the contract’s names and arguments', async () => {
+    invoke.mockResolvedValue(null)
+    const core = tauriCore()
+    await core.backupStatus()
+    await core.chooseBackupFolder()
+    await core.setBackupOptions({ auto: false, interval: 'weekly', keep: 3 })
+    await core.backupNow()
+    await core.pickBackup()
+    await core.cancelRestore()
+    await core.restoreBackup({ recoveryKey: 'k', skipSafetyBackup: false })
+    await core.restoreBackup({ recoveryKey: null, skipSafetyBackup: true })
+    expect(invoke.mock.calls).toEqual([
+      ['backup_status', undefined],
+      ['choose_backup_folder', undefined],
+      ['set_backup_options', { auto: false, interval: 'weekly', keep: 3 }],
+      ['backup_now', undefined],
+      ['pick_backup', undefined],
+      ['cancel_restore', undefined],
+      ['restore_backup', { recoveryKey: 'k', skipSafetyBackup: false }],
+      ['restore_backup', { recoveryKey: null, skipSafetyBackup: true }],
+    ])
+  })
+
+  it('returns backup results as the host sends them, null when cancelled', async () => {
+    const core = tauriCore()
+    const status = {
+      folder: '/Users/me/Dropbox/Notebook',
+      auto: true,
+      interval: 'daily',
+      keep: 14,
+      last: 1792677789000,
+      next_due: 1792764189000,
+      changed: false,
+      last_error: null,
+      failing: false,
+      overdue: false,
+      running: false,
+    }
+    invoke.mockResolvedValueOnce(status)
+    await expect(core.backupStatus()).resolves.toEqual(status)
+    invoke.mockResolvedValueOnce(null)
+    await expect(core.chooseBackupFolder()).resolves.toBeNull()
+    const picked = { file_name: 'notebook-backup-x.nbbackup', same_vault: true }
+    invoke.mockResolvedValueOnce(picked)
+    await expect(core.pickBackup()).resolves.toEqual(picked)
+    invoke.mockResolvedValueOnce(null)
+    await expect(core.pickBackup()).resolves.toBeNull()
+    invoke.mockRejectedValueOnce({
+      code: 'safety_backup_failed',
+      message: 'the backup folder is unavailable',
+    })
+    await expect(
+      core.restoreBackup({ recoveryKey: null, skipSafetyBackup: false }),
+    ).rejects.toEqual({
+      code: 'safety_backup_failed',
+      message: 'the backup folder is unavailable',
+    })
+  })
+
   it('passes host errors through and wraps anything else', async () => {
     const core = tauriCore()
     invoke.mockRejectedValueOnce({ code: 'recovery_key_wrong', message: 'x' })

@@ -1,9 +1,12 @@
 import type {
+  BackupOptions,
+  BackupStatus,
   CoreEvents,
   EditorOpened,
   ExportResult,
   ListEntry,
   Phase,
+  PickedBackup,
   Selection,
   Settings,
   TagNode,
@@ -72,6 +75,42 @@ export interface CoreApi {
    * whose message says why.
    */
   exportNotes(args: { includeTrashed: boolean }): Promise<ExportResult | null>
+
+  // ---- backup (see `docs/backup-format.md`) ----
+  backupStatus(): Promise<BackupStatus>
+  /**
+   * Opens the system folder picker and saves the choice. Resolves `null`
+   * when the user cancels. The first folder chosen gets a backup at once;
+   * if that fails the folder is still saved and the status says why.
+   */
+  chooseBackupFolder(): Promise<BackupStatus | null>
+  setBackupOptions(options: BackupOptions): Promise<BackupStatus>
+  /**
+   * Writes a backup now. Fails with `backup_no_folder`, or `backup_failed`
+   * whose message says why.
+   */
+  backupNow(): Promise<BackupStatus>
+  /**
+   * Opens the system file picker for a backup to restore, on the welcome
+   * screen or with the notebook open, and remembers it for
+   * {@link restoreBackup}. Resolves `null` when the user cancels. Fails
+   * with `backup_not_a_backup`, `backup_too_new`, or `backup_damaged`.
+   */
+  pickBackup(): Promise<PickedBackup | null>
+  /** Forgets the picked backup, when the user cancels the restore. */
+  cancelRestore(): Promise<void>
+  /**
+   * Replaces this device's notes with the picked backup and opens it.
+   * `recoveryKey` is needed unless the backup is of the open notebook
+   * (`recovery_key_required`, `recovery_key_malformed`,
+   * `recovery_key_wrong`). With the notebook open and a backup folder set,
+   * the current notes are backed up first unless `skipSafetyBackup`; if
+   * that fails it rejects with `safety_backup_failed` and changes nothing.
+   */
+  restoreBackup(args: {
+    recoveryKey: string | null
+    skipSafetyBackup: boolean
+  }): Promise<Phase>
 
   // ---- editor host (see `editor/bridge.ts`; updates are base64) ----
   editorOpen(note: string): Promise<EditorOpened>

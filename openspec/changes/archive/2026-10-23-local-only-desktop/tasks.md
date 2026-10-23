@@ -16,7 +16,7 @@
 - [x] 3.4 Implement `open_with_recovery_key` for the no-secure-store path, distinguishing mistyped (checksum) from wrong keys; verify tests for correct, wrong, and mistyped keys with the secure store disabled, and that nothing is written to any file
 - [x] 3.5 Implement the upgrade (auto-unlock path, `upgrade_with_passphrase` through `LocalUnlock`, and start-over that renames the old database to `vault.sqlite3.legacy-<timestamp>`); verify `vault_tests.rs` tests that seed a legacy signed-in install with notes and pending outbox entries, run each path, and find every note present, legacy entries deleted only after acknowledgment, and the renamed database intact on start-over
 - [x] 3.6 Remove the sign-in, register, recover, lock, unlock, reauthenticate, change-passphrase, sign-out, pending-count, and sync-status commands and their DTOs from `commands/mod.rs`, `dto.rs`, and the invoke handler; make permanent delete purely local; verify `cargo clippy -p notebook-app --all-targets -- -D warnings` and `cargo test -p notebook-app` pass, with a test that permanent delete works with no server running
-- [ ] 3.7 Narrow the CSP in `tauri.conf.json` to `connect-src 'self' ipc: http://ipc.localhost` (dev keeps `ws:`); verify the app starts under `cargo tauri dev` and no console CSP violations appear while editing
+- [x] 3.7 Narrow the CSP in `tauri.conf.json` to `connect-src 'self' ipc: http://ipc.localhost` (dev keeps `ws:`); verify the app starts under `cargo tauri dev` and no console CSP violations appear while editing
 
 ## 4. Frontend
 
@@ -26,8 +26,8 @@
 
 ## 5. Docs and integration
 
-- [ ] 5.1 Update `README.md` (description, layout, and "Running" for a local-only desktop app, plus an upgrade note: let sync settle, then install the new version and save the new recovery key); verify the documented `cargo tauri dev` flow works as written
-- [ ] 5.2 End-to-end on desktop: fresh install creates a notebook, survives relaunch with no prompt, and makes no outbound connection while editing (check with the OS network monitor or Little Snitch); upgrade a copy of a real signed-in data directory and confirm every note survives; verify by recording the results in the apply summary
+- [x] 5.1 Update `README.md` (description, layout, and "Running" for a local-only desktop app, plus an upgrade note: let sync settle, then install the new version and save the new recovery key); verify the documented `cargo tauri dev` flow works as written
+- [x] 5.2 End-to-end on desktop: fresh install creates a notebook, survives relaunch with no prompt, and makes no outbound connection while editing (check with the OS network monitor or Little Snitch); upgrade a copy of a real signed-in data directory and confirm every note survives; verify by recording the results in the apply summary
 - [x] 5.3 Run the definition-of-done checks from `CLAUDE.md` and `openspec validate local-only-desktop --strict`; verify all exit 0
 
 ## Workflow follow-up

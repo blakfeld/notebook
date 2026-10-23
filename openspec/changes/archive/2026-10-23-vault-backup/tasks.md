@@ -20,21 +20,21 @@ Groups 1–3 are core-only and can start before `local-only-desktop` is archived
 
 ## 4. App wiring (needs local-only-desktop)
 
-- [ ] 4.1 Add `tauri-plugin-dialog` if `markdown-export` hasn't, with Rust-side folder and file pickers and no JS dialog permission; implement `choose_backup_folder`, `set_backup_options`, `backup_now`, and `backup_status` commands and the `backup-status-changed` event over the device-local `backup.*` settings; verify mock-runtime tests for each command with the picker stubbed
-- [ ] 4.2 Implement the scheduler task (10-minute tick, dirty flag from replica changes, interval check, immediate first backup); verify tests with a manual clock for "Due backup runs", "Nothing changed", "First backup", and failing and overdue status
-- [ ] 4.3 Implement restore (header → same-vault or recovery key → open and verify → optional safety backup → build `.restoring` → swap with `before-restore` → keychain → reopen, with rollback); verify `vault_tests.rs` tests for "Full round trip" on an empty device, "Restore over existing notes", "Wrong recovery key", "Damaged backup", "Same-vault restore needs no key", a keychain failure rolling back, and a log-capture check that no log line holds the entered key
+- [x] 4.1 Add `tauri-plugin-dialog` if `markdown-export` hasn't, with Rust-side folder and file pickers and no JS dialog permission; implement `choose_backup_folder`, `set_backup_options`, `backup_now`, and `backup_status` commands and the `backup-status-changed` event over the device-local `backup.*` settings; verify mock-runtime tests for each command with the picker stubbed
+- [x] 4.2 Implement the scheduler task (10-minute tick, dirty flag from replica changes, interval check, immediate first backup); verify tests with a manual clock for "Due backup runs", "Nothing changed", "First backup", and failing and overdue status
+- [x] 4.3 Implement restore (header → same-vault or recovery key → open and verify → optional safety backup → build `.restoring` → swap with `before-restore` → keychain → reopen, with rollback); verify `vault_tests.rs` tests for "Full round trip" on an empty device, "Restore over existing notes", "Wrong recovery key", "Damaged backup", "Same-vault restore needs no key", a keychain failure rolling back, and a log-capture check that no log line holds the entered key
 
 ## 5. Frontend (needs local-only-desktop)
 
-- [ ] 5.1 Add the backup adapter methods to `web/src/platform` (types, Tauri, fake, demo); verify adapter unit tests and `npm run check`
-- [ ] 5.2 Add "Restore from backup" to the welcome screen (picker, recovery key input with mistyped-key feedback, progress, errors); verify component tests for "New computer", "Cancelled picker", and a mistyped key
-- [ ] 5.3 Add the Backup section to Settings (folder, auto toggle, interval, keep count, status, Back up now, encryption note, "Restore from backup…" with replace confirmation and safety backup); verify component tests for "No folder yet", "Status shown", "Safety backup first", and "Cancelled confirmation"
-- [ ] 5.4 Add `BackupNotice.svelte` in the sidebar footer, shown only when failing or overdue and opening Backup settings; verify component tests for "Dropbox folder gone" and "Healthy"
+- [x] 5.1 Add the backup adapter methods to `web/src/platform` (types, Tauri, fake, demo); verify adapter unit tests and `npm run check`
+- [x] 5.2 Add "Restore from backup" to the welcome screen (picker, recovery key input with mistyped-key feedback, progress, errors); verify component tests for "New computer", "Cancelled picker", and a mistyped key
+- [x] 5.3 Add the Backup section to Settings (folder, auto toggle, interval, keep count, status, Back up now, encryption note, "Restore from backup…" with replace confirmation and safety backup); verify component tests for "No folder yet", "Status shown", "Safety backup first", and "Cancelled confirmation"
+- [x] 5.4 Add `BackupNotice.svelte` in the sidebar footer, shown only when failing or overdue and opening Backup settings; verify component tests for "Dropbox folder gone" and "Healthy"
 
 ## 6. Integration
 
-- [ ] 6.1 End-to-end on desktop with a real Dropbox (or iCloud Drive) folder: choose the folder, edit notes, confirm automatic and manual backups appear and upload, unmount or rename the folder and see the sidebar notice, restore the backup on a second machine or a fresh data directory with the recovery key; verify by recording results in the apply summary
-- [ ] 6.2 Run the definition-of-done checks from `CLAUDE.md` and `openspec validate vault-backup --strict`; verify all exit 0
+- [x] 6.1 End-to-end on desktop with a real Dropbox (or iCloud Drive) folder: choose the folder, edit notes, confirm automatic and manual backups appear and upload, unmount or rename the folder and see the sidebar notice, restore the backup on a second machine or a fresh data directory with the recovery key; verify by recording results in the apply summary
+- [x] 6.2 Run the definition-of-done checks from `CLAUDE.md` and `openspec validate vault-backup --strict`; verify all exit 0
 
 ## Workflow follow-up
 
