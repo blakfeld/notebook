@@ -42,6 +42,25 @@ Replacing a note's base snapshot SHALL store the new snapshot and remove that no
 - **WHEN** a snapshot is taken through entry E2, entry E3 is stored, and then the snapshot replaces N's base through E2
 - **THEN** loading N returns the new snapshot followed by E3
 
+### Requirement: Long logs are compacted locally
+Once a note's log holds more than 200 entries after its base, the app SHALL replace the base with a snapshot covering every stored entry for that note and remove those entries. A note holding data only a newer build can read SHALL never be compacted. A failed compaction SHALL NOT fail the edit that triggered it.
+
+#### Scenario: Long log compacts and reloads the same
+- **WHEN** a note is edited until its log passes 200 entries
+- **THEN** it is stored as a base snapshot with no log entries, and reloading it gives the same note
+
+#### Scenario: Entries written by another process are kept
+- **WHEN** another process appends an update to a note and this process then edits the note past the threshold
+- **THEN** after compaction the note still reflects the other process's update
+
+#### Scenario: Newer data is never compacted away
+- **WHEN** a note holds an entry in a format this build can't read and is edited past the threshold
+- **THEN** its base and log are kept as they were, with the new edits appended
+
+#### Scenario: Failed compaction
+- **WHEN** compaction fails after an edit crosses the threshold
+- **THEN** the edit is stored, and compaction is not tried again until 200 more entries are stored
+
 ### Requirement: Delete a stored note
 Deleting a note SHALL remove its wrapped key, base snapshot, and log entries in one atomic step. Deleting a note the store does not hold SHALL have no effect.
 

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use notebook_core::document::EditorUpdate;
-use notebook_core::sync::EditorSessionId;
+use notebook_core::replica::EditorSessionId;
 use notebook_core::workspace::Changed;
 use serde::Serialize;
 

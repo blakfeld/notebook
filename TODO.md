@@ -82,7 +82,30 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 1. [ ] `vault-backup`, **app part** (task groups 4–6): scheduler, Back up now, Settings section, welcome-screen and settings restore, sidebar notice
    - Needs: `local-only-desktop` (welcome screen, phases, recovery entry).
-2. [ ] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
+2. [~] `retire-sync-server`: delete the server crate, auth, sync engine, transports, storage outbox and cursor, key bundle; local compaction; CI, docs, and agents for desktop-only
+   - In progress (branch `worktree-virtual-imagining-lightning`, uncommitted), 12 of 13 tasks done.
+     Started on top of main at `c12e62d`, where `local-only-desktop` code is merged (#16) but not archived (its
+     manual checks are pending), so this change can be built but not archived until that one is.
+   - Done: server crate, `auth`, `protocol`, and `sync` deleted; `Replica` moved to `notebook_core::replica` and
+     compacts a note's log locally past 200 entries; `Storage` trait without outbox, cursor, update IDs, or
+     pending keys; SQLite layout v3 upgrade that drops the sync columns and keeps every log entry (tests seed v1
+     and v2 stores with real encrypted notes); key bundle, recovery verifier, and OPAQUE stretching removed;
+     20 workspace dependencies dropped (139 fewer packages in `Cargo.lock`, no new duplicates); CI, `check.sh`,
+     and `CLAUDE.md` item 4 run the wasm32 check without features; README server sections replaced by an
+     operator shutdown note; `mobile-developer` agent deleted and the other agents made desktop-only.
+     fmt, both clippy runs, all tests, `scripts/check.sh`, and `openspec validate --strict` pass.
+   - Code review and security-analyst pass done; all findings fixed:
+     - Compaction now applies every stored entry before snapshotting, so it can't drop edits another app instance
+       wrote to the same database.
+     - Entries with an unknown envelope version or algorithm are never compacted away, like unknown document formats.
+     - Added tests for a failed compaction (the edit still succeeds; the retry waits 200 entries) and for both cases above.
+     - `serde`/`serde_json` moved to dev-dependencies.
+     - New `local-storage` requirement "Long logs are compacted locally"; the sync-client removals point at it.
+   - Deferred (pre-existing, minor): `SqliteStorage::open` runs migrations before the vault-binding check, so opening
+     a store for the wrong vault still upgrades its layout (data kept).
+   - Left: 7.1, manual: upgrade a copy of a real `local-only-desktop` data directory, confirm every note opens and
+     edits, then edit one heavily and confirm its log compacts. Then archive (after `local-only-desktop` and
+     `vault-backup`).
    - Needs: `local-only-desktop`.
    - Archive after `vault-backup`, so users can take a backup before the storage schema upgrade drops sync data.
 

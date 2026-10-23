@@ -1,10 +1,11 @@
-//! The vault key wrapped under the user's passphrase on one device, so a
-//! locked app can be unlocked without the server.
+//! The vault key wrapped under the user's passphrase on one device, as the
+//! server-backed version stored it for a locked app. Kept only to upgrade
+//! those installs.
 //!
 //! Layout: `kdf_version (1) || salt (16) || envelope`. The envelope seals the
 //! vault key under a key derived from the passphrase with Argon2id
 //! ([`derive_auth_secret`]) and then HKDF with its own label, bound to the
-//! vault ID, so it can't be confused with a key bundle entry.
+//! vault ID, so it can't be confused with any other wrap of the vault key.
 
 use std::fmt;
 

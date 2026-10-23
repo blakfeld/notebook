@@ -18,7 +18,7 @@
  * - `close` with `Replica::editor_detach`.
  *
  * It never calls `NoteDocument` directly, so every edit gets the replica's
- * single storage transaction and outbox entry.
+ * single storage transaction.
  *
  * Both sides are CRDT replicas, so every exchange is idempotent: an update
  * may be delivered twice, or race with one going the other way, and both

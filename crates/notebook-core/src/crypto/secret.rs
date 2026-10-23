@@ -1,4 +1,4 @@
-//! Auth secrets and derivation of the keys that wrap the vault key.
+//! Passphrase secrets and derivation of the keys that wrap the vault key.
 
 use std::fmt;
 
@@ -12,13 +12,13 @@ use super::{CryptoError, VaultId};
 /// Minimum length of an [`AuthSecret`] in bytes.
 pub const MIN_AUTH_SECRET_LEN: usize = 32;
 
-const INFO_AUTH: &[u8] = b"notebook/v1/kek/auth";
+// "notebook/v1/kek/auth" was the server key bundle's label; never reuse it.
 const INFO_RECOVERY: &[u8] = b"notebook/v1/kek/recovery";
 const INFO_LOCAL: &[u8] = b"notebook/v1/kek/local";
 
-/// A high-entropy secret from the auth layer that unlocks the key bundle:
-/// the OPAQUE export key, or the output of
-/// [`derive_auth_secret`](super::derive_auth_secret).
+/// A high-entropy secret derived from a passphrase by
+/// [`derive_auth_secret`](super::derive_auth_secret), for
+/// [`LocalUnlock`](super::LocalUnlock).
 #[derive(Zeroize, ZeroizeOnDrop)]
 pub struct AuthSecret(Vec<u8>);
 
@@ -32,12 +32,8 @@ impl AuthSecret {
         Ok(Self(bytes.to_vec()))
     }
 
-    pub(crate) fn wrapping_key(&self, vault: VaultId) -> SymmetricKey {
-        derive_wrapping_key(&self.0, vault, INFO_AUTH)
-    }
-
     /// The key for a device-local passphrase wrap
-    /// ([`LocalUnlock`](super::LocalUnlock)), distinct from the bundle's.
+    /// ([`LocalUnlock`](super::LocalUnlock)).
     pub(crate) fn local_wrapping_key(&self, vault: VaultId) -> SymmetricKey {
         derive_wrapping_key(&self.0, vault, INFO_LOCAL)
     }
@@ -49,13 +45,13 @@ impl fmt::Debug for AuthSecret {
     }
 }
 
-/// The wrapping key for the recovery entry of a bundle.
+/// The wrapping key for a [`RecoveryEntry`](super::RecoveryEntry).
 pub(crate) fn recovery_wrapping_key(secret: &[u8], vault: VaultId) -> SymmetricKey {
     derive_wrapping_key(secret, vault, INFO_RECOVERY)
 }
 
 /// HKDF-SHA256 with the vault ID as salt, so one secret gives unrelated keys
-/// for different vaults and the auth and recovery keys never coincide.
+/// for different vaults and the local and recovery keys never coincide.
 fn derive_wrapping_key(secret: &[u8], vault: VaultId, info: &[u8]) -> SymmetricKey {
     let mut okm = [0u8; 32];
     Hkdf::<Sha256>::new(Some(&vault.to_bytes()), secret)
@@ -85,12 +81,12 @@ mod tests {
         let secret = AuthSecret::from_bytes(&[5; 64]).unwrap();
         let v1 = VaultId::from_parts(1_000, 1);
         let v2 = VaultId::from_parts(1_000, 2);
-        let a = secret.wrapping_key(v1);
-        let b = secret.wrapping_key(v2);
+        let a = secret.local_wrapping_key(v1);
+        let b = secret.local_wrapping_key(v2);
         let c = recovery_wrapping_key(&[5; 64], v1);
         assert_ne!(a.as_bytes(), b.as_bytes());
         assert_ne!(a.as_bytes(), c.as_bytes());
-        assert_eq!(a.as_bytes(), secret.wrapping_key(v1).as_bytes());
+        assert_eq!(a.as_bytes(), secret.local_wrapping_key(v1).as_bytes());
     }
 
     #[test]
@@ -120,10 +116,13 @@ mod tests {
         let a = AuthSecret::from_bytes(&[1; 32]).unwrap();
         let b = AuthSecret::from_bytes(&[2; 32]).unwrap();
         let longer = AuthSecret::from_bytes(&[1; 33]).unwrap();
-        assert_ne!(a.wrapping_key(v).as_bytes(), b.wrapping_key(v).as_bytes());
         assert_ne!(
-            a.wrapping_key(v).as_bytes(),
-            longer.wrapping_key(v).as_bytes()
+            a.local_wrapping_key(v).as_bytes(),
+            b.local_wrapping_key(v).as_bytes()
+        );
+        assert_ne!(
+            a.local_wrapping_key(v).as_bytes(),
+            longer.local_wrapping_key(v).as_bytes()
         );
     }
 
@@ -131,11 +130,6 @@ mod tests {
     #[test]
     fn fixed_derivation_vectors() {
         let v = VaultId::from_bytes([0x11; 16]);
-        let auth = AuthSecret::from_bytes(&[5; 64]).unwrap();
-        assert_eq!(
-            hex(auth.wrapping_key(v).as_bytes()),
-            "cfb949342e8a324586900f55d2d04e9e529b7ed6980fe5d7cbaec8c487df4f33"
-        );
         assert_eq!(
             hex(recovery_wrapping_key(&[5; 64], v).as_bytes()),
             "684c7991603416044288eb58ea463400651cba9c5c7bcc477d69248511672223"
