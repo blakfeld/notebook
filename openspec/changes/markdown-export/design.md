@@ -6,12 +6,12 @@ See proposal.md (Why). Requirements are in `specs/markdown-export/spec.md` and `
 
 `notebook-core` has the `note` module (`Note`, `NoteId` as a ULID newtype, `Timestamp(i64)` Unix ms, `Note::title()`) and `tags`. It forbids `unsafe`, takes time from the caller, and CI builds it for `wasm32-unknown-unknown`. It has no date/time library: the note-model design deferred calendar formatting to "export, at its boundary". `crdt-note-documents` exposes each document's current state as a `Note` (`NoteDocument::note()`), so by the time this change is implemented the app holds every note, including archived and trashed, as `Note` values in memory. That is export's only input.
 
-Ordering (TODO.md): this change follows `desktop-app-shell` (it adds to `app-shell`) and precedes `browser-web-client` and `mobile-app`. So the desktop path is wired end to end here, while the browser and mobile paths get a ready-made core API that their own changes call.
+Ordering (TODO.md): this change follows `desktop-app-shell` (it adds to `app-shell`) and can run in parallel with `local-only-desktop` and `vault-backup`. Browser and mobile clients have been dropped, so the desktop folder is the only output. The vault is always open in the local-only app, so there's no locked state to handle. Until `local-only-desktop` lands, the command refuses while locked, as other commands do.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- One pure function that turns notes + options + export time into an exact list of files, so every output (folder, zip, share sheet) is the same export.
+- One pure function that turns notes + options + export time into an exact list of files, so the format rules live in one testable place.
 - A format a later import can parse without guessing, pinned by golden tests.
 - No plaintext touches disk except where the user explicitly asked for it.
 
@@ -21,7 +21,7 @@ Ordering (TODO.md): this change follows `desktop-app-shell` (it adds to `app-she
 - Exporting a single note or a tag subset. The core API takes any `&[Note]`, so a later UI can add this without format changes.
 - Rewriting bodies for other apps (e.g. converting `#multi word#` tags for Obsidian). Bodies stay verbatim.
 - Progress reporting or streaming. Personal-scale vaults export in well under a second.
-- The browser's wasm binding and download trigger, and the mobile share sheet; those belong to `browser-web-client` and `mobile-app`.
+- Zip output. It existed for the browser and mobile share sheet, which are dropped. A later browser client can add it on top of the same plan.
 
 ## Decisions
 
@@ -32,7 +32,6 @@ crates/notebook-core/src/export/
   mod.rs      ExportOptions, ExportFile, ExportPlan, plan(), ExportError, rustdoc for the format
   name.rs     sanitize(title) -> String, collision assignment
   time.rs     RFC 3339 formatting and folder-name stamp from Timestamp (civil-from-days)
-  zip.rs      write_zip(&ExportPlan) -> Result<Vec<u8>, ExportError>   (all targets)
   dir.rs      write_dir(&ExportPlan, parent: &Path) -> PathBuf   (cfg(not(target_arch = "wasm32")))
 ```
 
@@ -43,7 +42,7 @@ pub struct ExportPlan { pub folder_name: String, pub files: Vec<ExportFile> }  /
 pub fn plan(notes: &[Note], options: ExportOptions, now: Timestamp) -> ExportPlan;
 ```
 
-`plan` is pure and infallible: selection, naming, and rendering. The writers only serialize a plan. That keeps all format rules in one testable place and guarantees the folder and zip outputs agree (a spec requirement).
+`plan` is pure and infallible: selection, naming, and rendering. The writer only serializes a plan, which keeps all format rules in one testable place.
 
 **Alternative considered:** a streaming `Exporter` trait with folder and zip sinks. Rejected: it spreads format rules across sinks and buys nothing at this scale.
 
@@ -55,7 +54,7 @@ The original proposal wording was ambiguous ("non-trashed, with an option to inc
 
 Six keys in fixed order, written by hand rather than through a YAML library, because every value is a ULID, a timestamp, or a bool, none of which need quoting. `trashed` is always written (not only for trashed notes) so every file has the same shape. Tags are not duplicated into a `tags:` list: the body is the source of truth, and a second copy could disagree (e.g. tags inside code spans) and would have to be ignored by an importer anyway. The frontmatter always uses `\n`; the body keeps whatever line endings it has.
 
-Timestamps are formatted `YYYY-MM-DDTHH:MM:SS.sssZ` with a small civil-from-days routine (Howard Hinnant's algorithm) on `i64` ms. Obsidian reads these as datetime properties.
+Timestamps are formatted `YYYY-MM-DDTHH:MM:SS.sssZ` with a small civil-from-days routine (Howard Hinnant's algorithm) on `i64` ms. Obsidian reads these as datetime properties. The folder stamp formatter is shared with `vault-backup`'s file names. Whichever change lands first puts it where both can use it (`export/time.rs` exposed `pub(crate)`, or a core `time` module).
 
 **Alternative considered:** `chrono` or `time`. Rejected: one formatting function doesn't justify a date library in a wasm-built core. **Alternative considered:** `serde_yaml`. Rejected: unmaintained, and unnecessary for six scalar keys.
 
@@ -69,12 +68,6 @@ Names are assigned walking notes in ascending `NoteId` order (which is creation 
 
 **Alternative considered:** suffixing with part of the note ID (`Ideas (01JBX3).md`) for names that stay stable when notes are added. Rejected: ugly for the common case, and stability across different note sets isn't a requirement; determinism for the same set is.
 
-### Zip via the `zip` crate, deflate, deterministic
-
-`zip` with `default-features = false, features = ["deflate"]`, which uses `flate2` over `zlib-rs` (pure Rust) and builds for wasm32. Writes into `Cursor<Vec<u8>>`. Determinism: entries in plan order (sorted by name), a directory entry for the export folder first, the UTF-8 name flag set, each entry's DOS timestamp from the note's `updated` (UTC, clamped to the DOS range 1980–2107; the folder entry uses `now`), and fixed compression level. A test asserts two writes of the same plan are byte-identical. `write_zip` returns a `Result` rather than panicking on a zip error.
-
-**Alternative considered:** a hand-written store-only zip writer (~150 lines plus CRC32). Rejected: deflate matters for text, and zip edge cases (UTF-8 names, CRCs, central directory) are better left to a maintained crate.
-
 ### Folder writer: stage then rename
 
 `write_dir` resolves a free folder name (`notebook-export-…`, then `-2`, `-3`, …), creates a staging folder `notebook-export-incomplete-<random>` in the same parent (visible, so one left by a crash is noticed; mode 0700 on Unix, kept by the rename, so the export is private to the user), writes every file with `create_new(true)`, sets each mtime with `File::set_modified`, fsyncs, then renames the staging folder to the final name. On any error it removes the staging folder and returns the error. Same-parent rename is atomic on all desktop platforms, so the user either sees a complete export folder or none. The final name is re-checked immediately before the rename; if it was taken in the meantime the next suffix is used.
@@ -87,17 +80,15 @@ The `export_notes { include_trashed }` command opens the folder picker itself th
 
 ### Frontend: one adapter method
 
-The platform adapter gains `exportNotes({ includeTrashed }): Promise<ExportResult | null>`. The Tauri implementation invokes the command. The browser implementation (added by `browser-web-client`) will call a wasm `export_zip(include_trashed, now_ms)` returning bytes plus the suggested file name, wrap them in a `Blob`, click a temporary `<a download>`, and revoke the object URL. The settings UI is platform-neutral: it shows the warning and option, calls the adapter, and reports the result.
+The platform adapter gains `exportNotes({ includeTrashed }): Promise<ExportResult | null>`, and the Tauri implementation invokes the command. The fake and demo cores return a canned result. The settings UI shows the warning and option, calls the adapter, and reports the result.
 
 ## Risks / Trade-offs
 
-- [Plaintext export on disk or in Downloads defeats E2EE for that copy] → The UI warns before every export; nothing is written without an explicit user action; desktop writes only to a user-picked folder.
-- [Browser "nothing persisted" rule (`web-client`) vs. a downloaded zip] → The download is an explicit user action producing a user-owned file, not app storage. `browser-web-client` should state this exception in its spec.
+- [Plaintext export defeats encryption for that copy, and a cloud-synced folder hands it to the provider] → The UI warns before every export and advises against synced folders. Nothing is written without an explicit user action, and only to a user-picked folder. Encrypted backups (`vault-backup`) are the recommended off-device copy.
 - [Multi-word tags (`#side project#`) aren't understood by Obsidian] → Accepted; bodies stay verbatim so Notebook and Bear round-trip exactly. Documented in `docs/export-format.md`.
 - [Whole export held in memory] → Fine at personal scale (thousands of notes of text). Revisit with streaming when attachments arrive.
 - [Names shift when an older note with the same title appears] → Accepted; same input gives same output, and `id` in the frontmatter is the stable identity for import.
 - [`File::set_modified` unsupported on some filesystems (e.g. some network shares)] → Treat a failure to set mtime as non-fatal; the contents matter, times are a convenience. (Spec scenario uses a local disk.)
-- [DOS timestamps in zips are local-time without zone] → Written as UTC; unzip tools may show a shifted time. The authoritative times are in the frontmatter.
 
 ## Migration Plan
 
