@@ -195,6 +195,11 @@ pub async fn set_vim_mode(state: State<'_, AppState>, on: bool) -> Result<()> {
 }
 
 #[tauri::command]
+pub async fn set_preference(state: State<'_, AppState>, key: String, value: String) -> Result<()> {
+    state.set_preference(&key, &value)
+}
+
+#[tauri::command]
 pub async fn set_tag_expanded(
     state: State<'_, AppState>,
     path: String,

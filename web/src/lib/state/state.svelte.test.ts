@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FakeCoreApi } from '../../platform/fake'
+import { memorySettings } from '../../platform/settings'
+import { createPreferences } from '../preferences'
 import {
   createVault,
   PhaseState,
@@ -16,7 +18,7 @@ function unlocked(notes: ConstructorParameters<typeof FakeCoreApi>[0] = []) {
     credentials_remembered: true,
   }
   const phase = new PhaseState(core)
-  const vault = createVault(core, phase)
+  const vault = createVault(core, phase, createPreferences(memorySettings()))
   return { core, phase, vault }
 }
 
@@ -113,7 +115,11 @@ describe('vault state', () => {
 
   it('loads and writes settings', async () => {
     const { core, vault } = unlocked()
-    core.settings = { vim_mode: true, collapsed_tags: ['work'] }
+    core.settings = {
+      ...core.settings,
+      vim_mode: true,
+      collapsed_tags: ['work'],
+    }
     await startVault(vault)
     expect(vault.settings.vimMode).toBe(true)
     expect(vault.settings.isExpanded('Work')).toBe(false)

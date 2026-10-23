@@ -2,7 +2,11 @@
   import { onMount, untrack } from 'svelte'
   import type { DeviceSettings } from '../platform/settings'
   import type { NoteDocBridge } from './bridge'
-  import { createNoteEditor, type NoteEditorHandle } from './noteEditor'
+  import {
+    createNoteEditor,
+    type NoteEditorHandle,
+    type ViewOption,
+  } from './noteEditor'
 
   interface Props {
     bridge: NoteDocBridge
@@ -15,6 +19,11 @@
      */
     vimMode?: boolean
     readOnly?: boolean
+    /** Source view instead of live preview; follows changes. */
+    sourceView?: boolean
+    focusMode?: boolean
+    /** A keyboard command turned a view option on or off. */
+    onViewOption?: (option: ViewOption, on: boolean) => void
     onError?: (error: unknown) => void
     /** The editor, once mounted, for toolbars and shortcuts. */
     handle?: NoteEditorHandle | null
@@ -26,6 +35,9 @@
     noteId,
     vimMode,
     readOnly = false,
+    sourceView = false,
+    focusMode = false,
+    onViewOption,
     onError,
     handle = $bindable(null),
   }: Props = $props()
@@ -36,6 +48,9 @@
     const editor = createNoteEditor(container, {
       bridge,
       settings,
+      sourceView: untrack(() => sourceView),
+      focusMode: untrack(() => focusMode),
+      onViewOption: (option, on) => onViewOption?.(option, on),
       onError: (error) => onError?.(error),
     })
     handle = editor
@@ -58,6 +73,14 @@
 
   $effect(() => {
     handle?.setReadOnly(readOnly)
+  })
+
+  $effect(() => {
+    handle?.setSourceView(sourceView)
+  })
+
+  $effect(() => {
+    handle?.setFocusMode(focusMode)
   })
 </script>
 

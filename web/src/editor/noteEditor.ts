@@ -5,15 +5,34 @@ import {
   markdown,
   markdownLanguage,
 } from '@codemirror/lang-markdown'
-import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language'
+import { syntaxHighlighting } from '@codemirror/language'
+import { languages } from '@codemirror/language-data'
 import { search, searchKeymap } from '@codemirror/search'
-import { Compartment, EditorState, type Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
+import {
+  Compartment,
+  EditorState,
+  Prec,
+  type Extension,
+} from '@codemirror/state'
+import {
+  drawSelection,
+  EditorView,
+  highlightActiveLine,
+  keymap,
+} from '@codemirror/view'
 import { Vim, vim } from '@replit/codemirror-vim'
 import { yCollab, ySyncAnnotation } from 'y-codemirror.next'
 import * as Y from 'yjs'
+import { openExternal as platformOpenExternal } from '../platform/external'
 import type { DeviceSettings } from '../platform/settings'
 import { NoteClosedError, type NoteDocBridge, type OpenNoteDoc } from './bridge'
+import {
+  editorTheme,
+  focusMode,
+  livePreview,
+  noteHighlightStyle,
+  toggleTask,
+} from './preview'
 import { tagHighlighter, tagTheme } from './tags'
 
 /** The device setting that turns vim mode on (`"true"`) or off. */
@@ -32,11 +51,25 @@ const RETRY_DELAY_MS = 1000
  */
 export const REMOTE = Symbol('remote')
 
+/** The per-device view options, which the editor's keyboard commands toggle. */
+export type ViewOption = 'sourceView' | 'focusMode'
+
 export interface NoteEditorOptions {
   bridge: NoteDocBridge
   settings: DeviceSettings
   /** Called with failures the editor recovers from (delivery, settings). */
   onError?: (error: unknown) => void
+  /** Start in source view instead of live preview. */
+  sourceView?: boolean
+  /** Start with focus mode on. */
+  focusMode?: boolean
+  /**
+   * Called when a keyboard command turns a view option on or off, for the
+   * host to save. Changes through the handle don't call it.
+   */
+  onViewOption?: (option: ViewOption, on: boolean) => void
+  /** Opens a link outside the app. Defaults to the platform's. */
+  openExternal?: (url: string) => void
 }
 
 export interface NoteEditorHandle {
@@ -44,6 +77,8 @@ export interface NoteEditorHandle {
   /** The open note, or `null` if none. */
   readonly noteId: string | null
   readonly vimMode: boolean
+  readonly sourceView: boolean
+  readonly focusMode: boolean
   /** Resolves once the stored vim mode preference has been read. */
   readonly ready: Promise<void>
   /** Undoes the last local edit. Returns whether there was one. */
@@ -59,6 +94,12 @@ export interface NoteEditorHandle {
   focus(): void
   /** Turns vim mode on or off, and saves the choice on this device. */
   setVimMode(on: boolean): void
+  /**
+   * Switches between source view and live preview in place, keeping the
+   * selection, scroll position, undo history, and vim state.
+   */
+  setSourceView(on: boolean): void
+  setFocusMode(on: boolean): void
   setReadOnly(on: boolean): void
   /**
    * Delivers the open note's pending edits, closes it, and opens `noteId`
@@ -246,9 +287,6 @@ const readOnlyExtension = (on: boolean): Extension =>
       ]
     : []
 
-// Fills the host element the editor is mounted in.
-const fillHost = EditorView.theme({ '&': { height: '100%' } })
-
 /**
  * Creates a markdown note editor in `parent`, with no note open.
  *
@@ -260,11 +298,26 @@ const fillHost = EditorView.theme({ '&': { height: '100%' } })
  */
 export function createNoteEditor(
   parent: HTMLElement,
-  { bridge, settings, onError = () => {} }: NoteEditorOptions,
+  {
+    bridge,
+    settings,
+    onError = () => {},
+    sourceView: initialSourceView = false,
+    focusMode: initialFocusMode = false,
+    onViewOption = () => {},
+    openExternal = (url) => {
+      platformOpenExternal(url).catch(onError)
+    },
+  }: NoteEditorOptions,
 ): NoteEditorHandle {
   defineVimCommands()
   const vimCompartment = new Compartment()
   const readOnlyCompartment = new Compartment()
+  const previewCompartment = new Compartment()
+  const focusCompartment = new Compartment()
+  const preview = livePreview({ openExternal })
+  let sourceView = initialSourceView
+  let focusOn = initialFocusMode
   let vimOn = false
   let vimChosen = false
   let readOnly = false
@@ -285,17 +338,30 @@ export function createNoteEditor(
     EditorState.create({
       doc: current?.ytext.toString() ?? '',
       extensions: [
-        // First, so vim's keys win when it is on.
+        // Ahead of vim, so they work in its normal and insert modes too.
+        Prec.highest(
+          keymap.of([
+            { key: 'Mod-Enter', run: toggleTask },
+            { key: 'Mod-Shift-e', run: () => toggleView('sourceView') },
+            { key: 'Mod-Shift-d', run: () => toggleView('focusMode') },
+          ]),
+        ),
+        // First of the rest, so vim's keys win when it is on.
         vimCompartment.of(vimOn ? vim() : []),
         // Only `\n` breaks lines, so CodeMirror offsets match the Yjs text
         // exactly even when the body contains `\r`.
         EditorState.lineSeparator.of('\n'),
         markdown({
           base: markdownLanguage,
-          codeLanguages: [],
+          // Grammars load on demand, as same-origin chunks.
+          codeLanguages: languages,
           addKeymap: false,
         }),
-        syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
+        syntaxHighlighting(noteHighlightStyle),
+        drawSelection(),
+        highlightActiveLine(),
+        previewCompartment.of(sourceView ? [] : preview),
+        focusCompartment.of(focusOn ? focusMode : []),
         current
           ? yCollab(current.ytext, null, { undoManager: current.undoManager })
           : [],
@@ -318,7 +384,7 @@ export function createNoteEditor(
         ]),
         tagHighlighter,
         tagTheme,
-        fillHost,
+        editorTheme,
         keymap.of([...defaultKeymap, indentWithTab]),
         readOnlyCompartment.of(readOnlyExtension(readOnly || !current)),
       ],
@@ -333,6 +399,33 @@ export function createNoteEditor(
   const applyVim = (on: boolean) => {
     vimOn = on
     view.dispatch({ effects: vimCompartment.reconfigure(on ? vim() : []) })
+  }
+
+  // Line heights change, so the scroll position is restored by anchor.
+  const applySourceView = (on: boolean) => {
+    if (on === sourceView) return
+    sourceView = on
+    view.dispatch({
+      effects: [
+        previewCompartment.reconfigure(on ? [] : preview),
+        view.scrollSnapshot(),
+      ],
+    })
+  }
+  const applyFocusMode = (on: boolean) => {
+    if (on === focusOn) return
+    focusOn = on
+    view.dispatch({
+      effects: focusCompartment.reconfigure(on ? focusMode : []),
+    })
+  }
+
+  /** The keyboard commands: flip an option and tell the host. */
+  function toggleView(option: ViewOption): boolean {
+    if (option === 'sourceView') applySourceView(!sourceView)
+    else applyFocusMode(!focusOn)
+    onViewOption(option, option === 'sourceView' ? sourceView : focusOn)
+    return true
   }
 
   const ready = settings.get(VIM_MODE_KEY).then(
@@ -361,6 +454,12 @@ export function createNoteEditor(
     get vimMode() {
       return vimOn
     },
+    get sourceView() {
+      return sourceView
+    },
+    get focusMode() {
+      return focusOn
+    },
     ready,
     undo,
     redo,
@@ -372,6 +471,9 @@ export function createNoteEditor(
       if (on !== vimOn) applyVim(on)
       settings.set(VIM_MODE_KEY, String(on)).catch(onError)
     },
+
+    setSourceView: applySourceView,
+    setFocusMode: applyFocusMode,
 
     setReadOnly(on) {
       readOnly = on

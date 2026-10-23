@@ -1,17 +1,6 @@
-:root {
-  --text: #1f2328;
-  --muted: #656d76;
-  --bg: #ffffff;
-  --surface: #f6f8fa;
-  --border: #d8dee4;
-  --hover: #eaeef2;
-  --selected: #dbe9fb;
-  --accent: #0969da;
-  --accent-text: #ffffff;
-  --danger: #cf222e;
-  --warning: #9a6700;
-  --focus: #0969da;
+@import './theme/tokens.css';
 
+:root {
   font-family:
     system-ui,
     -apple-system,
@@ -21,24 +10,7 @@
   font-size: 14px;
   color: var(--text);
   background: var(--bg);
-  color-scheme: light dark;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --text: #e6edf3;
-    --muted: #8d96a0;
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #30363d;
-    --hover: #21262d;
-    --selected: #1f3a5f;
-    --accent: #4493f8;
-    --accent-text: #0d1117;
-    --danger: #f85149;
-    --warning: #d29922;
-    --focus: #4493f8;
-  }
+  accent-color: var(--accent);
 }
 
 body {
@@ -101,7 +73,7 @@ input[type='search'] {
   box-sizing: border-box;
   width: 100%;
   padding: 0.4rem 0.6rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--control);
   border-radius: 6px;
   background: var(--bg);
 }

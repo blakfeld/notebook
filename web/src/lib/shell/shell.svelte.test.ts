@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import '../../editor/testing'
 import type { SyncStatus } from '../../platform'
 import { FakeCoreApi, type SeedNote } from '../../platform/fake'
+import { coreSettings } from '../../platform/settings'
+import { createPreferences } from '../preferences'
 import { PhaseState } from '../state'
 import {
   alerts,
@@ -39,7 +41,9 @@ async function shell(
   setup?.(core)
   const phase = new PhaseState(core)
   await phase.start()
-  const view = render(Shell, { core, phase })
+  const preferences = createPreferences(coreSettings(core))
+  await preferences.load()
+  const view = render(Shell, { core, phase, preferences })
   let mounted = true
   // Unmounts the shell, as the app does when the vault locks.
   const destroy = () => {
@@ -48,7 +52,7 @@ async function shell(
   }
   cleanups.push(destroy)
   await settle()
-  return { core, phase, root: view.target, destroy }
+  return { core, phase, preferences, root: view.target, destroy }
 }
 
 /** Types into the open note, leaving the edit inside the editor's delay. */
@@ -196,9 +200,9 @@ describe('three-pane shell', () => {
     await vi.waitFor(() => expect(editorView(root).state.readOnly).toBe(true))
     const pane = root.querySelector<HTMLElement>('.editor-pane')!
     expect(pane.textContent).toMatch(/in Trash and can’t be edited/)
-    const actions = [...pane.querySelectorAll('[role="toolbar"] button')].map(
-      (b) => b.textContent!.trim(),
-    )
+    const actions = [
+      ...pane.querySelectorAll('[aria-label="Note actions"] button'),
+    ].map((b) => b.textContent!.trim())
     expect(actions).toEqual(['Restore'])
   })
 
@@ -343,27 +347,32 @@ describe('note actions', () => {
     const { core, root } = await shell([{ id: 'a', body: 'A' }])
     click(entry(root, 'a'))
     await settle()
-    const toolbar = root.querySelector<HTMLElement>('[role="toolbar"]')!
+    const toolbar = root.querySelector<HTMLElement>(
+      '[aria-label="Note actions"]',
+    )!
     click(button(toolbar, 'Pin'))
     await settle()
     expect(core.callsTo('setPinned')).toEqual([['a', true]])
     click(
-      button(root.querySelector<HTMLElement>('[role="toolbar"]')!, 'Archive'),
+      button(
+        root.querySelector<HTMLElement>('[aria-label="Note actions"]')!,
+        'Archive',
+      ),
     )
     await settle()
     expect(core.callsTo('setArchived')).toEqual([['a', true]])
     click(
       button(
-        root.querySelector<HTMLElement>('[role="toolbar"]')!,
+        root.querySelector<HTMLElement>('[aria-label="Note actions"]')!,
         'Move to Trash',
       ),
     )
     await settle()
     expect(core.callsTo('setTrashed')).toEqual([['a', true]])
     // The trashed note stays open, read-only, with only Restore.
-    const actions = [...root.querySelectorAll('[role="toolbar"] button')].map(
-      (b) => b.textContent!.trim(),
-    )
+    const actions = [
+      ...root.querySelectorAll('[aria-label="Note actions"] button'),
+    ].map((b) => b.textContent!.trim())
     expect(actions).toEqual(['Restore'])
   })
 
@@ -455,6 +464,41 @@ describe('note actions', () => {
     expect(phase.current?.phase).toBe('locked')
   })
 
+  it('keeps Mod+Shift+F for search inside the editor; view keys don’t clash', async () => {
+    const { preferences, root } = await shell([{ id: 'a', body: 'A' }])
+    click(entry(root, 'a'))
+    await vi.waitFor(() =>
+      expect(editorView(root).state.doc.toString()).toBe('A'),
+    )
+    const content = editorView(root).contentDOM
+    const chord = (key: string) =>
+      content.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key,
+          keyCode: key.charCodeAt(0),
+          // Real key events leave the shadow root and reach the window.
+          composed: true,
+          ctrlKey: true,
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    chord('F')
+    expect(document.activeElement).toBe(field(root, 'Search notes'))
+    expect(preferences.current.focusMode).toBe(false)
+
+    field(root, 'Search notes').blur()
+    chord('D')
+    chord('E')
+    await settle()
+    expect(preferences.current).toMatchObject({
+      focusMode: true,
+      sourceView: true,
+    })
+    expect(document.activeElement).not.toBe(field(root, 'Search notes'))
+  })
+
   it('creates a note from Pinned in Notes, where it shows', async () => {
     const { core, root } = await shell([{ id: 'a', body: 'A', pinned: true }])
     await selectView(root, 'Pinned')
@@ -534,7 +578,7 @@ describe('pending edits are delivered first', () => {
     const { core, root } = await editing()
     click(
       button(
-        root.querySelector<HTMLElement>('[role="toolbar"]')!,
+        root.querySelector<HTMLElement>('[aria-label="Note actions"]')!,
         'Move to Trash',
       ),
     )
@@ -630,6 +674,20 @@ describe('Settings', () => {
     await settle()
     expect(core.callsTo('setVimMode')).toEqual([[true]])
     expect(getCM(editorView(root))).not.toBeNull()
+  })
+
+  it('sets the theme from Appearance and saves it on the device', async () => {
+    const { core, dialog, preferences } = await openSettings()
+    click(button(dialog, 'Appearance'))
+    expect(field(dialog, 'System').checked).toBe(true)
+    check(field(dialog, 'Dark'))
+    await settle()
+    expect(preferences.current.theme).toBe('dark')
+    expect(core.callsTo('setPreference')).toEqual([
+      ['appearance.theme', 'dark'],
+    ])
+    expect(field(dialog, 'Dark').checked).toBe(true)
+    expect(field(dialog, 'System').checked).toBe(false)
   })
 
   it('warns how many changes sign-out loses and needs confirmation', async () => {

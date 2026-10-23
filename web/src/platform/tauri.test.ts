@@ -111,3 +111,14 @@ describe('tauriCore', () => {
     await expect(off.ready).rejects.toThrow('no permission')
   })
 })
+
+describe('openExternal on Tauri', () => {
+  it('opens through the opener plugin, and only allowed schemes', async () => {
+    const openUrl = vi.fn().mockResolvedValue(undefined)
+    vi.doMock('@tauri-apps/plugin-opener', () => ({ openUrl }))
+    const { openExternal } = await import('./external')
+    expect(await openExternal('mailto:sam@example.com')).toBe(true)
+    expect(await openExternal('file:///etc/passwd')).toBe(false)
+    expect(openUrl.mock.calls).toEqual([['mailto:sam@example.com']])
+  })
+})

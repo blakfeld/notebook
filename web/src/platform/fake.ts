@@ -9,6 +9,7 @@ import type {
   Phase,
   Selection,
   Settings,
+  ThemePreference,
   SyncStatus,
   TagNode,
 } from './types'
@@ -29,7 +30,13 @@ export class FakeCoreApi implements CoreApi {
     credentials_remembered: true,
   }
   syncState: SyncStatus = { state: 'synced', pending: 0, attention: [] }
-  settings: Settings = { vim_mode: false, collapsed_tags: [] }
+  settings: Settings = {
+    vim_mode: false,
+    theme: 'system',
+    source_view: false,
+    focus_mode: false,
+    collapsed_tags: [],
+  }
   /** Every call so far, by method name, with its arguments. */
   readonly calls: { method: string; args: unknown[] }[] = []
   /** The account `signIn` accepts; any other credentials are refused. */
@@ -355,13 +362,28 @@ export class FakeCoreApi implements CoreApi {
 
   getSettings = () =>
     this.call('getSettings', [], () => ({
-      vim_mode: this.settings.vim_mode,
+      ...this.settings,
       collapsed_tags: [...this.settings.collapsed_tags],
     }))
 
   setVimMode = (on: boolean) =>
     this.call('setVimMode', [on], () => {
       this.settings.vim_mode = on
+    })
+
+  setPreference = (key: string, value: string) =>
+    this.call('setPreference', [key, value], () => {
+      const on = value === 'true'
+      const flag = on || value === 'false'
+      if (key === 'appearance.theme' && isTheme(value)) {
+        this.settings.theme = value
+      } else if (key === 'editor.sourceView' && flag) {
+        this.settings.source_view = on
+      } else if (key === 'editor.focusMode' && flag) {
+        this.settings.focus_mode = on
+      } else {
+        throw fail('internal')
+      }
     })
 
   setTagExpanded = (path: string, expanded: boolean) =>
@@ -516,6 +538,9 @@ interface FakeNote {
 function fail(code: ErrorCode): CoreError {
   return { code, message: code }
 }
+
+const isTheme = (value: string): value is ThemePreference =>
+  value === 'system' || value === 'light' || value === 'dark'
 
 function bodyOf(note: FakeNote): string {
   return note.doc.getText('body').toString()

@@ -32,6 +32,10 @@ use crate::vault::{self, EngineThread};
 
 /// Device setting keys. Values are not sensitive.
 pub const VIM_MODE_KEY: &str = "editor.vimMode";
+pub const THEME_KEY: &str = "appearance.theme";
+pub const SOURCE_VIEW_KEY: &str = "editor.sourceView";
+pub const FOCUS_MODE_KEY: &str = "editor.focusMode";
+const THEMES: [&str; 3] = ["system", "light", "dark"];
 const COLLAPSED_TAGS_KEY: &str = "sidebar.collapsedTags";
 /// A UX hint only: the missing `auto-unlock` entry is what keeps the vault
 /// locked.
@@ -550,14 +554,25 @@ impl AppState {
 
     pub fn settings(&self) -> AppResult<SettingsDto> {
         let read = |storage: &dyn SettingsRead| -> AppResult<SettingsDto> {
+            let on = |key| -> AppResult<bool> { Ok(storage.get(key)?.as_deref() == Some("true")) };
+            let theme = storage
+                .get(THEME_KEY)?
+                .filter(|t| THEMES.contains(&t.as_str()))
+                .unwrap_or_else(|| THEMES[0].to_owned());
             Ok(SettingsDto {
-                vim_mode: storage.get(VIM_MODE_KEY)?.as_deref() == Some("true"),
+                vim_mode: on(VIM_MODE_KEY)?,
+                theme,
+                source_view: on(SOURCE_VIEW_KEY)?,
+                focus_mode: on(FOCUS_MODE_KEY)?,
                 collapsed_tags: Vec::new(),
             })
         };
         match &*self.lock_phase() {
             Phase::SignedOut => Ok(SettingsDto {
                 vim_mode: false,
+                theme: THEMES[0].to_owned(),
+                source_view: false,
+                focus_mode: false,
                 collapsed_tags: Vec::new(),
             }),
             Phase::Locked(account) => read(&self.0.open_settings(account)?),
@@ -585,6 +600,23 @@ impl AppState {
 
     pub fn set_vim_mode(&self, on: bool) -> AppResult<()> {
         self.set_setting(VIM_MODE_KEY, if on { "true" } else { "false" })
+    }
+
+    /// Stores one of the UI preferences the frontend owns (theme, source
+    /// view, focus mode). Other keys and malformed values are refused.
+    pub fn set_preference(&self, key: &str, value: &str) -> AppResult<()> {
+        let valid = match key {
+            THEME_KEY => THEMES.contains(&value),
+            SOURCE_VIEW_KEY | FOCUS_MODE_KEY => matches!(value, "true" | "false"),
+            _ => false,
+        };
+        if !valid {
+            return Err(AppError::new(
+                Code::Internal,
+                format!("unsupported preference {key}={value}"),
+            ));
+        }
+        self.set_setting(key, value)
     }
 
     /// Remembers whether a tag is expanded in the sidebar. Needs the vault
