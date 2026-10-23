@@ -57,6 +57,33 @@ describe('vault state', () => {
     expect(core.callsTo('listNotes').length).toBe(lists + 1)
   })
 
+  it('re-queries only the list when the tree is unchanged', async () => {
+    const { core, vault } = opened([{ id: 'a', body: 'A' }])
+    await startVault(vault)
+    const lists = core.callsTo('listNotes').length
+    const trees = core.callsTo('tagTree').length
+    core.emit('vault-changed', { changed: ['a'], tree_changed: false })
+    await vi.waitFor(() =>
+      expect(core.callsTo('listNotes').length).toBe(lists + 1),
+    )
+    expect(core.callsTo('tagTree').length).toBe(trees)
+    stopVault(vault)
+  })
+
+  it('retries a failed tree query on the next change', async () => {
+    const { core, vault } = opened([{ id: 'a', body: 'A' }])
+    await startVault(vault)
+    core.failNext('tagTree', 'internal')
+    core.emit('vault-changed', { changed: ['a'], tree_changed: true })
+    await vi.waitFor(() => expect(vault.notes.error).not.toBeNull())
+    const trees = core.callsTo('tagTree').length
+    core.emit('vault-changed', { changed: ['a'], tree_changed: false })
+    await vi.waitFor(() =>
+      expect(core.callsTo('tagTree').length).toBe(trees + 1),
+    )
+    stopVault(vault)
+  })
+
   it('debounces the search query', async () => {
     vi.useFakeTimers()
     const { core, vault } = opened([

@@ -29,6 +29,8 @@ export class NotesState {
   #timer: ReturnType<typeof setTimeout> | undefined
   #listGeneration = 0
   #treeGeneration = 0
+  /** The last tag tree query failed, so the next change retries it. */
+  #treeStale = false
   #seen = $state<ListEntry | null>(null)
   #offs: (() => void)[] = []
 
@@ -41,8 +43,8 @@ export class NotesState {
   start(): Promise<void> {
     if (this.#offs.length === 0) {
       this.#offs.push(
-        this.#core.on('vault-changed', ({ changed }) => {
-          void this.#onChanged(changed)
+        this.#core.on('vault-changed', ({ changed, tree_changed }) => {
+          void this.#onChanged(changed, tree_changed)
         }),
         this.#selection.onChange(() => void this.refreshList()),
       )
@@ -61,8 +63,9 @@ export class NotesState {
    * the list, it may have been deleted permanently (here or on another
    * device): if no view holds it any more, the editor closes.
    */
-  async #onChanged(changed: string[]): Promise<void> {
-    await this.refresh()
+  async #onChanged(changed: string[], treeChanged: boolean): Promise<void> {
+    // Typing changes the open note about once a second; the tree rarely.
+    await (treeChanged || this.#treeStale ? this.refresh() : this.refreshList())
     const id = this.#selection.noteId
     if (id === null || !changed.includes(id)) return
     if (this.entries.some((e) => e.id === id)) return
@@ -132,9 +135,13 @@ export class NotesState {
     const generation = ++this.#treeGeneration
     try {
       const tree = await this.#core.tagTree()
-      if (generation === this.#treeGeneration) this.tree = tree
+      if (generation !== this.#treeGeneration) return
+      this.tree = tree
+      this.#treeStale = false
     } catch (error) {
-      if (generation === this.#treeGeneration) this.error = error
+      if (generation !== this.#treeGeneration) return
+      this.error = error
+      this.#treeStale = true
     }
   }
 

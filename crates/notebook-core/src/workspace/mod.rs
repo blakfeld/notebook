@@ -112,6 +112,8 @@ const PREVIEW_CHARS: usize = 200;
 pub struct Workspace<S: Storage> {
     replica: Shared<Replica<S>>,
     tree: TagTree,
+    /// Each note's tags, so an edit reparses only the notes it changed.
+    tags: BTreeMap<NoteId, Vec<TagPath>>,
     index: SearchIndex,
     /// Each attached editor's note, to refuse edits to trashed notes.
     editors: BTreeMap<EditorSessionId, NoteId>,
@@ -126,6 +128,7 @@ impl<S: Storage> Workspace<S> {
         let mut workspace = Self {
             replica,
             tree: TagTree::default(),
+            tags: BTreeMap::new(),
             index: SearchIndex::new(),
             editors: BTreeMap::new(),
             changes,
@@ -191,9 +194,10 @@ impl<S: Storage> Workspace<S> {
     /// Replaces a note's body. Refused for trashed notes.
     pub fn set_body(&mut self, id: NoteId, body: &str, now: Timestamp) -> Result<()> {
         self.check_editable(id)?;
-        self.replica.lock().set_body(id, body, now)?;
+        let result = self.replica.lock().set_body(id, body, now);
+        // Also on failure: the note in memory may have kept the edit.
         self.refresh(&[id]);
-        Ok(())
+        Ok(result?)
     }
 
     pub fn set_pinned(&mut self, id: NoteId, pinned: bool) -> Result<()> {
@@ -238,20 +242,22 @@ impl<S: Storage> Workspace<S> {
     pub fn rename_tag(&mut self, old: &str, new: &str, now: Timestamp) -> Result<usize> {
         let notes = self.replica.lock().notes();
         let changes = tags::rename(&notes, old, new)?;
-        let mut done = Vec::with_capacity(changes.len());
+        let mut attempted = Vec::with_capacity(changes.len());
         let mut result = Ok(());
         {
             let mut replica = self.replica.lock();
             for (id, body) in &changes {
+                // Refreshed even if it fails: the note in memory may have
+                // kept the edit.
+                attempted.push(*id);
                 if let Err(err) = replica.set_body(*id, body, now) {
                     result = Err(err.into());
                     break;
                 }
-                done.push(*id);
             }
         }
-        self.refresh(&done);
-        result.map(|()| done.len())
+        self.refresh(&attempted);
+        result.map(|()| attempted.len())
     }
 
     /// Attaches an editor to note `id` (see [`Replica::editor_attach`]).
@@ -273,13 +279,15 @@ impl<S: Storage> Workspace<S> {
             ReplicaError::EditorSessionNotFound(session),
         ))?;
         self.check_editable(id)?;
-        if self
+        let result = self
             .replica
             .lock()
-            .apply_editor_update(session, update, now)?
-        {
+            .apply_editor_update(session, update, now);
+        // Also on failure: the note in memory may have kept the edit.
+        if !matches!(result, Ok(false)) {
             self.refresh(&[id]);
         }
+        result?;
         Ok(())
     }
 
@@ -318,8 +326,14 @@ impl<S: Storage> Workspace<S> {
             let replica = self.replica.lock();
             for &id in ids {
                 match replica.note(id) {
-                    Some(note) => self.index.upsert(id, note.body()),
-                    None => self.index.remove(id),
+                    Some(note) => {
+                        self.index.upsert(id, note.body());
+                        self.tags.insert(id, tags::tags_of(note.body()));
+                    }
+                    None => {
+                        self.index.remove(id);
+                        self.tags.remove(&id);
+                    }
                 }
             }
             replica.notes()
@@ -330,7 +344,7 @@ impl<S: Storage> Workspace<S> {
             .filter(|id| !notes.iter().any(|n| n.id() == *id))
             .collect();
         self.editors.retain(|_, id| !gone.contains(id));
-        let tree = TagTree::build(&notes);
+        let tree = self.build_tree(&notes);
         let tree_changed = tree != self.tree;
         self.tree = tree;
         let _ = self.changes.unbounded_send(Changed {
@@ -342,10 +356,18 @@ impl<S: Storage> Workspace<S> {
     fn rebuild(&mut self) {
         let notes = self.replica.lock().notes();
         self.index = SearchIndex::new();
+        self.tags.clear();
         for note in &notes {
             self.index.upsert(note.id(), note.body());
+            self.tags.insert(note.id(), tags::tags_of(note.body()));
         }
-        self.tree = TagTree::build(&notes);
+        self.tree = self.build_tree(&notes);
+    }
+
+    fn build_tree(&self, notes: &[Note]) -> TagTree {
+        TagTree::build_with(notes, |note| {
+            self.tags.get(&note.id()).map_or(&[][..], Vec::as_slice)
+        })
     }
 
     fn check_editable(&self, id: NoteId) -> Result<()> {
