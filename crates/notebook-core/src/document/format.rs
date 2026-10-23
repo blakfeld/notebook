@@ -67,6 +67,12 @@ impl EncryptedUpdate {
 pub struct EncryptedSnapshot(Vec<u8>);
 
 impl EncryptedSnapshot {
+    /// Wraps stored ciphertext, such as a snapshot read back from a backup.
+    /// Nothing is checked until a document loads it.
+    pub(crate) fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

@@ -145,6 +145,22 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
+    fn import_note(&mut self, id: NoteId, wrapped_key: &[u8], snapshot: &[u8]) -> Result<()> {
+        if self.notes.contains_key(&id) {
+            return Err(StorageError::DuplicateNote(id));
+        }
+        self.notes.insert(
+            id,
+            MemNote {
+                wrapped_key: wrapped_key.to_vec(),
+                key_pending: false,
+                base: Some(snapshot.to_vec()),
+                log: BTreeMap::new(),
+            },
+        );
+        Ok(())
+    }
+
     fn append_local(&mut self, id: NoteId, update: LocalUpdate) -> Result<()> {
         if !self.notes.contains_key(&id) {
             return Err(StorageError::NoteNotFound(id));

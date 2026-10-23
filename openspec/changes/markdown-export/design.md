@@ -60,17 +60,17 @@ Timestamps are formatted `YYYY-MM-DDTHH:MM:SS.sssZ` with a small civil-from-days
 
 ### Readable names, not slugs
 
-The proposal draft said "slugified titles". Names are instead the title with only unsafe characters replaced (`Grocery list.md`, not `grocery-list.md`). Obsidian and similar tools use the file name as the note's display name and link target, and Bear exports the same way, so readable names make the export usable as a vault rather than only an archive. The replaced set is the union of Windows-illegal characters and characters that break Obsidian wikilinks (`# ^ [ ]`); the 120-byte cap leaves room for ` NNN.md` and the folder path under common 255-byte name limits. Unicode is not normalized (no NFC/NFD pass): it would add a dependency, and the title is kept as the user typed it.
+The proposal draft said "slugified titles". Names are instead the title with only unsafe characters replaced (`Grocery list.md`, not `grocery-list.md`). Obsidian and similar tools use the file name as the note's display name and link target, and Bear exports the same way, so readable names make the export usable as a vault rather than only an archive. The replaced set is the union of Windows-illegal characters and characters that break Obsidian wikilinks (`# ^ [ ]`); the 120-byte cap leaves room for ` NNN.md` and the folder path under common 255-byte name limits. The name keeps the title's Unicode form as typed (no NFC/NFD rewrite).
 
 ### Collision suffixes by identifier order
 
-Names are assigned walking notes in ascending `NoteId` order (which is creation order), checking a set of lowercased names already taken. Lowercasing makes the export safe on case-insensitive filesystems (macOS, Windows) and in zips extracted there. ` N` matches what Finder and Obsidian do.
+Names are assigned walking notes in ascending `NoteId` order (which is creation order), checking a set of names already taken, keyed by the case-folded (upper- then lowercased) NFC form. Folding and NFC make the export safe on case-insensitive filesystems (macOS, Windows) and in zips extracted there. ` N` matches what Finder and Obsidian do.
 
 **Alternative considered:** suffixing with part of the note ID (`Ideas (01JBX3).md`) for names that stay stable when notes are added. Rejected: ugly for the common case, and stability across different note sets isn't a requirement; determinism for the same set is.
 
 ### Folder writer: stage then rename
 
-`write_dir` resolves a free folder name (`notebook-export-…`, then `-2`, `-3`, …), creates a hidden staging folder `.notebook-export-<random>.partial` in the same parent, writes every file with `create_new(true)`, sets each mtime with `File::set_modified`, fsyncs, then renames the staging folder to the final name. On any error it removes the staging folder and returns the error. Same-parent rename is atomic on all desktop platforms, so the user either sees a complete export folder or none. The final name is re-checked immediately before the rename; if it was taken in the meantime the next suffix is used.
+`write_dir` resolves a free folder name (`notebook-export-…`, then `-2`, `-3`, …), creates a staging folder `notebook-export-incomplete-<random>` in the same parent (visible, so one left by a crash is noticed; mode 0700 on Unix, kept by the rename, so the export is private to the user), writes every file with `create_new(true)`, sets each mtime with `File::set_modified`, fsyncs, then renames the staging folder to the final name. On any error it removes the staging folder and returns the error. Same-parent rename is atomic on all desktop platforms, so the user either sees a complete export folder or none. The final name is re-checked immediately before the rename; if it was taken in the meantime the next suffix is used.
 
 ### Desktop: the picker runs in Rust
 

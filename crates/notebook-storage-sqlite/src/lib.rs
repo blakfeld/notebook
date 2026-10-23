@@ -445,6 +445,19 @@ impl Storage for SqliteStorage {
         tx.commit().db()
     }
 
+    fn import_note(&mut self, id: NoteId, wrapped_key: &[u8], snapshot: &[u8]) -> Result<()> {
+        let tx = self.conn.transaction().db()?;
+        if note_exists(&tx, id)? {
+            return Err(StorageError::DuplicateNote(id));
+        }
+        tx.execute(
+            "INSERT INTO notes (note_id, wrapped_key, key_pending, base) VALUES (?1, ?2, 0, ?3)",
+            params![id.to_bytes(), wrapped_key, snapshot],
+        )
+        .db()?;
+        tx.commit().db()
+    }
+
     fn append_local(&mut self, id: NoteId, update: LocalUpdate) -> Result<()> {
         let tx = self.conn.transaction().db()?;
         if !note_exists(&tx, id)? {

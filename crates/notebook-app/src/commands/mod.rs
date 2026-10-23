@@ -5,9 +5,10 @@
 use tauri::State;
 use zeroize::Zeroizing;
 
-use crate::dto::{ListEntryDto, PhaseDto, SelectionDto, SettingsDto, TagNodeDto};
+use crate::dto::{ExportResultDto, ListEntryDto, PhaseDto, SelectionDto, SettingsDto, TagNodeDto};
 use crate::editor::OpenedDto;
 use crate::error::AppError;
+use crate::export::Picker;
 use crate::state::AppState;
 
 type Result<T> = std::result::Result<T, AppError>;
@@ -110,6 +111,17 @@ pub async fn delete_permanently(state: State<'_, AppState>, id: String) -> Resul
 #[tauri::command]
 pub async fn rename_tag(state: State<'_, AppState>, old: String, new: String) -> Result<usize> {
     state.rename_tag(&old, &new)
+}
+
+/// Opens the system folder picker and exports into the chosen folder.
+/// `null` when the user cancels.
+#[tauri::command]
+pub async fn export_notes(
+    state: State<'_, AppState>,
+    picker: State<'_, Picker>,
+    include_trashed: bool,
+) -> Result<Option<ExportResultDto>> {
+    state.export_notes(&*picker.0, include_trashed).await
 }
 
 // ---- editor ----

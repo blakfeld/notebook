@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { useVault } from '../state'
+  import type { ExportResult } from '../../platform'
+  import { errorMessage } from '../errors'
+  import { flushEditor, useVault } from '../state'
   import { formatVersion } from '../version'
   import Modal from './Modal.svelte'
 
@@ -10,7 +12,8 @@
 
   let { onClose }: Props = $props()
 
-  const { core, settings, preferences } = useVault()
+  const vault = useVault()
+  const { core, settings, preferences } = vault
 
   /**
    * The screen's sections, in order. Other capabilities add theirs here
@@ -19,6 +22,7 @@
   const SECTIONS = [
     { id: 'appearance', label: 'Appearance' },
     { id: 'editor', label: 'Editor' },
+    { id: 'export', label: 'Export' },
     { id: 'about', label: 'About' },
   ] as const
 
@@ -40,6 +44,28 @@
       () => (version = null),
     )
   })
+
+  // ---- export ----
+  let includeTrashed = $state(false)
+  let exporting = $state(false)
+  let exported = $state<ExportResult | null>(null)
+  let exportError = $state('')
+
+  async function exportNotes() {
+    if (exporting) return
+    exporting = true
+    exported = null
+    exportError = ''
+    try {
+      // Edits still in the editor are part of the export.
+      await flushEditor(vault)
+      exported = await core.exportNotes({ includeTrashed })
+    } catch (error) {
+      exportError = errorMessage(error)
+    } finally {
+      exporting = false
+    }
+  }
 </script>
 
 <Modal labelledby="settings-title" {onClose}>
@@ -115,6 +141,45 @@
             <p class="hint" id="vim-hint">
               Vim keys in the editor. Applies to this device only.
             </p>
+          </div>
+        {:else if section === 'export'}
+          <div class="group">
+            <h3>Export all notes</h3>
+            <p class="hint">
+              Saves every note as a markdown file, with its dates and state, in
+              a new folder. Archived notes are included.
+            </p>
+            <p class="warning-text" id="export-warning">
+              Exported files are plain, unencrypted text. Anyone who can open
+              them can read your notes.
+            </p>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                bind:checked={includeTrashed}
+                disabled={exporting}
+              />
+              Include notes in Trash
+            </label>
+            <button
+              type="button"
+              aria-describedby="export-warning"
+              disabled={exporting}
+              onclick={exportNotes}
+            >
+              {exporting ? 'Exporting…' : 'Export all notes…'}
+            </button>
+            {#if exported}
+              <p class="hint" role="status">
+                Exported {exported.count === 1
+                  ? '1 note'
+                  : `${exported.count} notes`} to
+                <span class="path">{exported.path}</span>
+              </p>
+            {/if}
+            {#if exportError}
+              <p class="form-error" role="alert">{exportError}</p>
+            {/if}
           </div>
         {:else if section === 'about'}
           <dl>
@@ -198,6 +263,24 @@
     flex-direction: column;
     gap: 0.5rem;
     align-items: flex-start;
+  }
+
+  h3 {
+    margin: 0;
+    font-size: 0.95rem;
+  }
+
+  .group p {
+    margin: 0;
+  }
+
+  .warning-text {
+    color: var(--warning);
+  }
+
+  .path {
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, monospace;
   }
 
   fieldset {

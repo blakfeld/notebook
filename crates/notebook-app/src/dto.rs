@@ -127,6 +127,15 @@ pub fn parse_note_id(id: &str) -> AppResult<NoteId> {
         .map_err(|_| AppError::new(Code::NotFound, "malformed note id"))
 }
 
+/// The `export_notes` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportResultDto {
+    /// How many notes were exported.
+    pub count: usize,
+    /// The export folder that was written.
+    pub path: String,
+}
+
 /// The `vault-changed` payload: ids only; the frontend re-queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VaultChangedDto {

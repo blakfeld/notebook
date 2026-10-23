@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use notebook_core::export::ExportError;
 use notebook_core::storage::StorageError;
 use notebook_core::sync::ReplicaError;
 use notebook_core::workspace::WorkspaceError;
@@ -28,6 +29,8 @@ pub enum Code {
     /// The notebook isn't open, or the command doesn't fit the current phase.
     NotOpen,
     NotFound,
+    /// Writing an export failed. The message says why and is shown.
+    ExportFailed,
     Internal,
 }
 
@@ -79,6 +82,12 @@ impl From<WorkspaceError> for AppError {
             WorkspaceError::Replica(_) | WorkspaceError::Sync(_) => Code::Internal,
         };
         Self::new(code, message)
+    }
+}
+
+impl From<ExportError> for AppError {
+    fn from(err: ExportError) -> Self {
+        Self::new(Code::ExportFailed, err.to_string())
     }
 }
 

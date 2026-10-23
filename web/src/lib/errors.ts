@@ -16,11 +16,22 @@ const MESSAGES: Record<ErrorCode, string> = {
   not_trashed: 'Only notes in Trash can be deleted permanently.',
   not_open: 'The notebook isn’t open.',
   not_found: 'That note no longer exists.',
+  export_failed: 'The export failed. Nothing was written.',
   internal: 'Something went wrong. Try again.',
 }
 
 /** The user-facing message for a failed command. */
 export function errorMessage(error: unknown): string {
   if (!isCoreError(error)) return MESSAGES.internal
+  // An export failure says why (e.g. the folder isn't writable).
+  if (error.code === 'export_failed' && error.message) {
+    return `${MESSAGES.export_failed} ${sentence(error.message)}`
+  }
   return MESSAGES[error.code] ?? MESSAGES.internal
+}
+
+function sentence(text: string): string {
+  const trimmed = text.trim()
+  const capital = trimmed.charAt(0).toUpperCase() + trimmed.slice(1)
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`
 }

@@ -110,6 +110,24 @@ impl VaultKey {
         envelope::open(self.0.as_bytes(), &setting_context(vault), sealed)
     }
 
+    /// Encrypts a whole-vault backup payload, bound to `vault`.
+    pub(crate) fn seal_backup(
+        &self,
+        vault: VaultId,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        envelope::seal(self.0.as_bytes(), &backup_context(vault), plaintext)
+    }
+
+    /// Decrypts a payload from [`seal_backup`](Self::seal_backup).
+    pub(crate) fn open_backup(
+        &self,
+        vault: VaultId,
+        sealed: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, CryptoError> {
+        envelope::open(self.0.as_bytes(), &backup_context(vault), sealed)
+    }
+
     /// The raw key, for a host that keeps it in the OS credential store
     /// while the app is unlocked. Never store it anywhere else.
     pub fn to_secret_bytes(&self) -> Zeroizing<[u8; 32]> {
@@ -194,6 +212,17 @@ fn setting_context(vault: VaultId) -> Context {
     Context {
         vault,
         kind: KIND_SEALED_SETTING,
+        note: None,
+    }
+}
+
+/// Envelope kind for a backup payload sealed by the vault key.
+const KIND_BACKUP: u8 = 48;
+
+fn backup_context(vault: VaultId) -> Context {
+    Context {
+        vault,
+        kind: KIND_BACKUP,
         note: None,
     }
 }

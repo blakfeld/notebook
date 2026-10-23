@@ -574,7 +574,7 @@ describe('Settings', () => {
     const tabs = [...dialog.querySelectorAll('[role="tab"]')].map((t) =>
       t.textContent!.trim(),
     )
-    expect(tabs).toEqual(['Appearance', 'Editor', 'About'])
+    expect(tabs).toEqual(['Appearance', 'Editor', 'Export', 'About'])
     for (const text of seen) {
       expect(text).not.toMatch(
         /server|account|passphrase|lock|sign[- ]?out|sign[- ]?in|sync/i,
@@ -639,5 +639,116 @@ describe('Settings', () => {
     click(button(alert, 'Dismiss'))
     await settle()
     expect(document.querySelector('.shell [role="alert"]')).toBeNull()
+  })
+})
+
+describe('Export', () => {
+  const seeded: SeedNote[] = [
+    { id: 'a', body: 'Active' },
+    { id: 'b', body: 'Archived', archived: true },
+    { id: 'c', body: 'Trashed', trashed: true },
+  ]
+
+  async function openExport(notes: SeedNote[] = seeded) {
+    const opened = await shell(notes)
+    click(button(opened.root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'Export'))
+    return { ...opened, dialog }
+  }
+
+  const status = (dialog: HTMLElement) =>
+    dialog.querySelector('[role="status"]')?.textContent?.replace(/\s+/g, ' ')
+
+  it('warns that the export is unencrypted before it starts', async () => {
+    const { core, dialog } = await openExport()
+    expect(dialog.textContent).toMatch(/plain, unencrypted text/)
+    expect(field(dialog, 'Include notes in Trash').checked).toBe(false)
+    expect(core.callsTo('exportNotes')).toEqual([])
+  })
+
+  it('exports, then reports the count and where the notes went', async () => {
+    const { core, dialog } = await openExport()
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    expect(core.callsTo('exportNotes')).toEqual([[{ includeTrashed: false }]])
+    expect(status(dialog)).toMatch(
+      'Exported 2 notes to /Users/alice/Backups/notebook-export-20261021-140305',
+    )
+    expect(alerts(dialog)).toEqual([])
+  })
+
+  it('includes trashed notes when asked', async () => {
+    const { core, dialog } = await openExport()
+    check(field(dialog, 'Include notes in Trash'))
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    expect(core.callsTo('exportNotes')).toEqual([[{ includeTrashed: true }]])
+    expect(status(dialog)).toMatch(/Exported 3 notes/)
+  })
+
+  it('says “1 note” for one', async () => {
+    const { dialog } = await openExport([{ body: 'Only' }])
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    expect(status(dialog)).toMatch(/Exported 1 note to/)
+  })
+
+  it('shows nothing when the folder picker is cancelled', async () => {
+    const { core, dialog } = await openExport()
+    core.exportCancelled = true
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    expect(core.callsTo('exportNotes')).toHaveLength(1)
+    expect(status(dialog)).toBeUndefined()
+    expect(alerts(dialog)).toEqual([])
+  })
+
+  it('explains a failure and does not report success', async () => {
+    const { core, dialog } = await openExport()
+    core.failNext(
+      'exportNotes',
+      'export_failed',
+      'permission denied (os error 13)',
+    )
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    expect(alerts(dialog)).toEqual([
+      'The export failed. Nothing was written. Permission denied (os error 13).',
+    ])
+    expect(status(dialog)).toBeUndefined()
+  })
+
+  it('disables the button while exporting', async () => {
+    const { core, dialog } = await openExport()
+    core.latency = 20
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    expect(button(dialog, 'Exporting…').disabled).toBe(true)
+    click(button(dialog, 'Exporting…'))
+    await vi.waitFor(() => expect(status(dialog)).toMatch(/Exported 2 notes/))
+    expect(core.callsTo('exportNotes')).toHaveLength(1)
+    expect(button(dialog, 'Export all notes…').disabled).toBe(false)
+  })
+
+  it('delivers the open editor’s edits before exporting', async () => {
+    const { core, root } = await shell([{ id: 'a', body: 'A' }])
+    click(entry(root, 'a'))
+    await vi.waitFor(() =>
+      expect(editorView(root).state.doc.toString()).toBe('A'),
+    )
+    typeInEditor(root, 'B')
+    click(button(root, 'Settings'))
+    await settle()
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!
+    click(button(dialog, 'Export'))
+    click(button(dialog, 'Export all notes…'))
+    await settle()
+    const methods = core.calls.map((c) => c.method)
+    expect(methods.lastIndexOf('editorPush')).toBeLessThan(
+      methods.indexOf('exportNotes'),
+    )
+    expect(core.body('a')).toBe('BA')
   })
 })
