@@ -65,6 +65,8 @@ sha2_010 = { package = "sha2", version = "0.10.9", default-features = false }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 tauri = { version = "2.12.4", features = [] }
 tauri-build = { version = "2.7.3", features = [] }
+# The folder picker for export runs on the Rust side; no JS dialog permission.
+tauri-plugin-dialog = "2.8.3"
 tempfile = "3.27.0"
 tokio = { version = "1.54.0", features = ["rt-multi-thread", "macros"] }
 tokio-tungstenite = "0.29.0"
@@ -77,3 +79,5 @@ unicode-normalization = "0.1.25"
 ulid = { version = "3.0.0", default-features = false }
 yrs = { version = "0.28.0", features = ["small-client"] }
 zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
+# Pure-Rust deflate only, so the markdown export zip builds for wasm32.
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }

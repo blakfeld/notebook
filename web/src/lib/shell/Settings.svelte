@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { errorCode, type Phase } from '../../platform'
+  import { errorCode, type ExportResult, type Phase } from '../../platform'
   import { checkNewPassphrase, errorMessage } from '../errors'
   import { shortcutLabel, syncSummary } from '../format'
   import { flushEditor, useVault } from '../state'
@@ -21,6 +21,7 @@
   const SECTIONS = [
     { id: 'account', label: 'Account' },
     { id: 'editor', label: 'Editor' },
+    { id: 'export', label: 'Export' },
   ] as const
   type Section = (typeof SECTIONS)[number]['id']
 
@@ -89,6 +90,29 @@
       }
     } finally {
       busy = false
+    }
+  }
+
+  // ---- export ----
+  let includeTrashed = $state(false)
+  let exporting = $state(false)
+  let exported = $state<ExportResult | null>(null)
+  let exportError = $state('')
+  let unlocked = $derived(phase.current?.phase === 'unlocked')
+
+  async function exportNotes() {
+    if (exporting || !unlocked) return
+    exporting = true
+    exported = null
+    exportError = ''
+    try {
+      // Edits still in the editor are part of the export.
+      await flushEditor(vault)
+      exported = await core.exportNotes({ includeTrashed })
+    } catch (error) {
+      exportError = errorMessage(error)
+    } finally {
+      exporting = false
     }
   }
 
@@ -301,6 +325,45 @@
               Vim keys in the editor. Applies to this device only.
             </p>
           </div>
+        {:else if section === 'export'}
+          <div class="group">
+            <h3>Export all notes</h3>
+            <p class="hint">
+              Saves every note as a markdown file, with its dates and state, in
+              a new folder. Archived notes are included.
+            </p>
+            <p class="warning-text" id="export-warning">
+              Exported files are plain, unencrypted text. Anyone who can open
+              them can read your notes.
+            </p>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                bind:checked={includeTrashed}
+                disabled={exporting}
+              />
+              Include notes in Trash
+            </label>
+            <button
+              type="button"
+              aria-describedby="export-warning"
+              disabled={exporting || !unlocked}
+              onclick={exportNotes}
+            >
+              {exporting ? 'Exporting…' : 'Export all notes…'}
+            </button>
+            {#if exported}
+              <p class="hint" role="status">
+                Exported {exported.count === 1
+                  ? '1 note'
+                  : `${exported.count} notes`} to
+                <span class="path">{exported.path}</span>
+              </p>
+            {/if}
+            {#if exportError}
+              <p class="form-error" role="alert">{exportError}</p>
+            {/if}
+          </div>
         {/if}
       </div>
     </div>
@@ -407,6 +470,19 @@
 
   .warning p {
     margin: 0 0 0.5rem;
+  }
+
+  .group p {
+    margin: 0;
+  }
+
+  .warning-text {
+    color: var(--warning);
+  }
+
+  .path {
+    overflow-wrap: anywhere;
+    font-family: ui-monospace, monospace;
   }
 
   .toggle {

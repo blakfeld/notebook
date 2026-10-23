@@ -78,6 +78,14 @@ export interface Settings {
   collapsed_tags: string[]
 }
 
+/** The `export_notes` result. */
+export interface ExportResult {
+  /** How many notes were exported. */
+  count: number
+  /** Where they went: the export folder, or the downloaded zip's name. */
+  path: string
+}
+
 /** The `editor_open` result. */
 export interface EditorOpened {
   session: number
@@ -123,6 +131,7 @@ export type ErrorCode =
   | 'not_trashed'
   | 'locked'
   | 'not_found'
+  | 'export_failed'
   | 'internal'
 
 /**

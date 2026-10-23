@@ -1,4 +1,5 @@
 import { FakeCoreApi } from './fake'
+import type { CoreError } from './types'
 
 /**
  * The fake core with a few sample notes, for viewing the UI with `npm run
@@ -18,5 +19,12 @@ export function demoCore(): FakeCoreApi {
     { body: '# Draft\nNot needed any more.', trashed: true },
   ])
   core.latency = 50
+  // The browser's zip download comes with `browser-web-client`.
+  core.exportNotes = async () => {
+    throw {
+      code: 'export_failed',
+      message: 'export isn’t available in the browser yet',
+    } satisfies CoreError
+  }
   return core
 }

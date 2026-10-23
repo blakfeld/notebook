@@ -126,6 +126,15 @@ pub fn parse_note_id(id: &str) -> AppResult<NoteId> {
         .map_err(|_| AppError::new(Code::NotFound, "malformed note id"))
 }
 
+/// The `export_notes` result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportResultDto {
+    /// How many notes were exported.
+    pub count: usize,
+    /// The export folder that was written.
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncStateDto {

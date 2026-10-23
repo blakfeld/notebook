@@ -5,6 +5,7 @@ import type {
   CoreError,
   CoreEvents,
   ErrorCode,
+  ExportResult,
   ListEntry,
   Phase,
   Selection,
@@ -38,6 +39,10 @@ export class FakeCoreApi implements CoreApi {
   recoveryKey = 'AAAA-BBBB-CCCC-DDDD'
   /** While true, the server counts as unreachable. */
   offline = false
+  /** While true, `exportNotes` acts as if the folder picker was dismissed. */
+  exportCancelled = false
+  /** Where `exportNotes` says the export went. */
+  exportPath = '/Users/alice/Backups/notebook-export-20261021-140305'
   /** Delays every call by this many milliseconds (0 for none). */
   latency = 0
   /**
@@ -316,6 +321,16 @@ export class FakeCoreApi implements CoreApi {
       }
       this.changed(changed)
       return changed.length
+    })
+
+  exportNotes = (args: { includeTrashed: boolean }) =>
+    this.call('exportNotes', [args], (): ExportResult | null => {
+      this.unlocked()
+      if (this.exportCancelled) return null
+      const count = [...this.notes.values()].filter(
+        (note) => args.includeTrashed || !note.trashed,
+      ).length
+      return { count, path: this.exportPath }
     })
 
   editorOpen = (noteId: string) =>

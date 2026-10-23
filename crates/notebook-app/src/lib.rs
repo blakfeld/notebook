@@ -9,6 +9,7 @@ mod dto;
 mod editor;
 mod error;
 mod events;
+mod export;
 #[cfg(test)]
 mod integration_tests;
 mod notes;
@@ -53,6 +54,7 @@ fn register<R: Runtime>(builder: Builder<R>) -> Builder<R> {
         commands::set_trashed,
         commands::delete_permanently,
         commands::rename_tag,
+        commands::export_notes,
         commands::editor_open,
         commands::editor_push,
         commands::editor_close,
@@ -98,6 +100,7 @@ fn device() -> Device {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     register(Builder::default())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
@@ -109,6 +112,11 @@ pub fn run() {
             };
             let emitter = Arc::new(TauriEmitter(app.handle().clone()));
             app.manage(AppState::launch(config, creds, emitter));
+            // Mobile exports through the share sheet (`mobile-app`).
+            #[cfg(desktop)]
+            app.manage(export::Picker(Arc::new(export::DialogPicker(
+                app.handle().clone(),
+            ))));
             Ok(())
         })
         .run(context())
@@ -225,14 +233,55 @@ pub(crate) mod tests {
 
     use serde_json::{Value, json};
 
-    use crate::state::tests::{Install, PASSPHRASE, TestServer, registered};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A mock app managing `state`, and its main webview.
+    use futures::future::BoxFuture;
+
+    use crate::export::{FolderPicker, Picker};
+    use crate::state::tests::{Install, PASSPHRASE, TestServer, notes, registered};
+
+    /// A folder picker that answers `folder` and counts how often it opened.
+    struct StubPicker {
+        folder: Option<PathBuf>,
+        opened: AtomicUsize,
+    }
+
+    impl StubPicker {
+        fn new(folder: Option<PathBuf>) -> Arc<Self> {
+            Arc::new(Self {
+                folder,
+                opened: AtomicUsize::new(0),
+            })
+        }
+
+        fn opened(&self) -> usize {
+            self.opened.load(Ordering::SeqCst)
+        }
+    }
+
+    impl FolderPicker for StubPicker {
+        fn pick(&self) -> BoxFuture<'static, Option<PathBuf>> {
+            self.opened.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::ready(self.folder.clone()))
+        }
+    }
+
+    /// A mock app managing `state`, and its main webview. Its folder picker
+    /// is always cancelled.
     pub(crate) fn mock_app(
         state: AppState,
     ) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
+        mock_app_with_picker(state, StubPicker::new(None))
+    }
+
+    fn mock_app_with_picker(
+        state: AppState,
+        picker: Arc<StubPicker>,
+    ) -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
         let app = register(mock_builder())
             .manage(state)
+            .manage(Picker(picker))
             .build(mock_context(noop_assets()))
             .expect("mock app builds");
         let webview = WebviewWindowBuilder::new(&app, "main", Default::default())
@@ -311,5 +360,79 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(err["code"], "locked");
+    }
+
+    fn file_names(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn export_is_refused_while_locked() {
+        let install = Install::new();
+        let parent = tempfile::tempdir().unwrap();
+        let picker = StubPicker::new(Some(parent.path().to_owned()));
+        let (_app, webview) = mock_app_with_picker(install.launch(), picker.clone());
+        let err = call(&webview, "export_notes", json!({"includeTrashed": false})).unwrap_err();
+        assert_eq!(err["code"], "locked");
+        assert_eq!(picker.opened(), 0);
+        assert!(file_names(parent.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn export_writes_into_the_picked_folder() {
+        let server = TestServer::start().await;
+        let install = Install::new();
+        let state = registered(&server, &install, "alice").await;
+        let mut ids = Vec::new();
+        for body in ["Ideas", "Ideas", "Old #work/acme", "Gone"] {
+            let id = state.create_note(notes()).unwrap();
+            let note = dto::parse_note_id(&id).unwrap();
+            state
+                .with_vault(|u| Ok(u.workspace.set_body(note, body, state::now())?))
+                .unwrap();
+            ids.push(id);
+        }
+        state.set_archived(&ids[2], true).unwrap();
+        state.set_trashed(&ids[3], true).unwrap();
+
+        let parent = tempfile::tempdir().unwrap();
+        let picker = StubPicker::new(Some(parent.path().to_owned()));
+        let (_app, webview) = mock_app_with_picker(state, picker.clone());
+
+        let result = call(&webview, "export_notes", json!({"includeTrashed": false})).unwrap();
+        assert_eq!(result["count"], 3);
+        let folder = PathBuf::from(result["path"].as_str().unwrap());
+        assert_eq!(folder.parent(), Some(parent.path()));
+        let name = folder.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with("notebook-export-"), "{name}");
+        assert_eq!(
+            file_names(&folder),
+            ["Ideas 2.md", "Ideas.md", "Old work acme.md"]
+        );
+        let archived = std::fs::read_to_string(folder.join("Old work acme.md")).unwrap();
+        assert!(archived.contains("\narchived: true\n"));
+        assert!(archived.ends_with("---\nOld #work/acme"));
+
+        let result = call(&webview, "export_notes", json!({"includeTrashed": true})).unwrap();
+        assert_eq!(result["count"], 4);
+        let folder = PathBuf::from(result["path"].as_str().unwrap());
+        assert!(folder.join("Gone.md").exists());
+        assert_eq!(file_names(parent.path()).len(), 2);
+        assert_eq!(picker.opened(), 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_export_writes_nothing() {
+        let server = TestServer::start().await;
+        let install = Install::new();
+        let state = registered(&server, &install, "alice").await;
+        let (_app, webview) = mock_app(state);
+        let result = call(&webview, "export_notes", json!({"includeTrashed": false})).unwrap();
+        assert_eq!(result, Value::Null);
     }
 }
