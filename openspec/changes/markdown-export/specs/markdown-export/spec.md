@@ -2,25 +2,20 @@
 
 ## Purpose
 
-Defines how a client exports the user's decrypted notes as portable markdown files: which notes are included, the file format, file naming, and the folder and zip outputs, so the export can serve as the user's own backup.
+Defines how the desktop app exports the user's notes as portable, readable markdown files: which notes are included, the file format, file naming, and the folder output, so the notes can be read or moved without Notebook.
 
 ## ADDED Requirements
 
 ### Requirement: Client-side export
-Export SHALL be produced entirely on the client from the notes it holds in decrypted form, including local edits not yet synced. It SHALL NOT contact the server or require a network connection, and it SHALL be available only while the vault is unlocked.
+Export SHALL be produced entirely on the device from the notes the app holds in decrypted form, including edits made moments before. It SHALL NOT require a network connection.
 
 #### Scenario: Export while offline
-- **WHEN** the client has no network connection and the user exports
+- **WHEN** the device has no network connection and the user exports
 - **THEN** the export completes and contains every selected note
 
-#### Scenario: Unsynced edits are included
-- **WHEN** a note has a local edit that the server has not yet acknowledged and the user exports
+#### Scenario: Latest edits are included
+- **WHEN** the user edits a note and exports immediately
 - **THEN** the exported file contains the edited body
-
-#### Scenario: Locked vault
-- **WHEN** the vault is locked
-- **THEN** export is not available until the user unlocks it
-
 ### Requirement: Note selection
 By default an export SHALL include every note that is not trashed, both active and archived. When the include-trashed option is set, it SHALL also include trashed notes. Each included note SHALL produce exactly one file.
 
@@ -131,7 +126,7 @@ Notes SHALL be named in ascending note-identifier order. A note SHALL take its s
 - **THEN** both exports have the same file names with the same contents
 
 ### Requirement: Folder output
-On native clients, export SHALL write the export folder inside a parent folder the user chooses. It SHALL NOT overwrite existing files: if a folder with the export name exists, the name SHALL get the smallest `-N` suffix (N ≥ 2) that is free. Each file's modification time SHALL be set to the note's updated time where the filesystem supports it.
+Export SHALL write the export folder inside a parent folder the user chooses. It SHALL NOT overwrite existing files: if a folder with the export name exists, the name SHALL get the smallest `-N` suffix (N ≥ 2) that is free. Each file's modification time SHALL be set to the note's updated time where the filesystem supports it.
 
 #### Scenario: Export into a chosen folder
 - **WHEN** the user picks `~/Backups` and exports at 2026-10-21 14:03:05 UTC
@@ -151,18 +146,3 @@ If writing any file fails, the folder export SHALL fail with an error and SHALL 
 #### Scenario: Write failure
 - **WHEN** the disk fills up partway through an export
 - **THEN** the user sees an error and no export folder remains in the chosen location
-
-### Requirement: Zip output
-Export SHALL be able to produce a single zip archive, built in memory, named `<export folder name>.zip`, whose only top-level entry is the export folder holding the same files the folder output would write. Entry names SHALL be UTF-8 and entries SHALL appear in file-name order.
-
-#### Scenario: Zip contents match folder output
-- **WHEN** the same notes are exported once as a folder and once as a zip at the same export time
-- **THEN** extracting the zip yields the same folder name, file names, and file contents
-
-#### Scenario: Non-ASCII names in the zip
-- **WHEN** a note titled `Café` is exported as a zip
-- **THEN** a standard unzip tool extracts it as `Café.md`
-
-#### Scenario: Deterministic zip
-- **WHEN** the same notes are exported as a zip twice with the same export time
-- **THEN** the two archives are byte-identical

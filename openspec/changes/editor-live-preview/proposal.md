@@ -12,7 +12,7 @@ The note editor must be beautiful. The functional editor from `note-editor-compo
   - Render task list checkboxes as interactive toggles that edit the underlying `- [ ]` text, plus a keyboard command to toggle the task on the current line.
   - Render tags as styled pills, still editable as text, using the same tag grammar as the existing highlighter.
   - Render fenced code blocks in monospace with language-aware highlighting.
-  - Links open in the system browser on Mod-click (or tap on touch), and only for `http`, `https`, and `mailto` URLs. Live preview never fetches remote content: images and raw HTML stay as source text.
+  - Links open in the system browser on Mod-click, and only for `http`, `https`, and `mailto` URLs. Live preview never fetches remote content: images and raw HTML stay as source text.
 - **Typography and layout**: a readable measure (max line width), self-hosted fonts (proportional prose plus monospace code), comfortable line height, and generous margins that shrink on narrow screens.
 - **Themes**: light and dark themes for the whole app that follow the OS preference, with a per-device manual override (System / Light / Dark) in Settings.
 - **Focus and polish**: optional focus mode that dims every block except the one holding the cursor, smooth cursor movement (off under reduced motion), and a subtle active-line treatment.
@@ -31,7 +31,7 @@ The note editor must be beautiful. The functional editor from `note-editor-compo
 
 - Frontend (`web/`): CodeMirror 6 view plugins and decorations in the editor module, a theme module using CSS custom properties, preference storage through the existing device-local settings in the platform adapter, and a theme control in the Settings view from `desktop-app-shell`.
 - New frontend dependencies: `@codemirror/language-data` (lazily loaded code-block languages) and self-hosted font packages bundled as same-origin assets, so the CSP needs no new origins.
-- Platform adapter gains `openExternal(url)`. On Tauri this adds the opener plugin to `notebook-app` with a capability scoped to `http`, `https`, and `mailto` URLs. In the browser it opens a new tab with `noopener`.
-- No `notebook-core`, server, storage, or sync changes.
-- Depends on `note-editor-component` (must be archived first, since this change adds to `note-editor`) and on `desktop-app-shell` for the Settings view. `mobile-app` relies on live preview working with touch selection and the virtual keyboard.
-- Needs visual QA across desktop, browser, and narrow (mobile) widths, in both themes.
+- Platform adapter gains `openExternal(url)`. This adds the opener plugin to `notebook-app` with a capability scoped to `http`, `https`, and `mailto` URLs. The browser dev build opens a new tab with `noopener`.
+- No `notebook-core` or storage changes.
+- Depends on `note-editor-component` (must be archived first, since this change adds to `note-editor`) and on `desktop-app-shell` for the Settings view.
+- Needs visual QA in the desktop app at wide and narrow window widths, in both themes.

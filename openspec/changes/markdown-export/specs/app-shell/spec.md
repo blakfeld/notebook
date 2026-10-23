@@ -3,15 +3,11 @@
 ## ADDED Requirements
 
 ### Requirement: Export all notes from settings
-Settings SHALL offer an "Export all notes" action, available while the vault is unlocked, with an include-trashed option that is off by default. It SHALL produce a markdown export as defined by the `markdown-export` capability, delivered as a folder on desktop and as a zip download in the browser.
+Settings SHALL offer an "Export all notes" action with an include-trashed option that is off by default. It SHALL write a markdown export, as defined by the `markdown-export` capability, into a folder the user picks in the system folder picker.
 
 #### Scenario: Desktop export
-- **WHEN** a desktop user chooses "Export all notes" and picks a folder in the system folder picker
+- **WHEN** the user chooses "Export all notes" and picks a folder in the system folder picker
 - **THEN** the export folder is written inside the picked folder
-
-#### Scenario: Browser export
-- **WHEN** a browser user chooses "Export all notes"
-- **THEN** the browser downloads a single `.zip` file containing the export
 
 #### Scenario: Cancelled picker
 - **WHEN** the user dismisses the folder picker without choosing a folder
@@ -22,7 +18,7 @@ Settings SHALL offer an "Export all notes" action, available while the vault is 
 - **THEN** the export also contains the trashed notes
 
 ### Requirement: Export warns that output is unencrypted
-Before exporting, the action SHALL tell the user that exported files are plain, unencrypted text readable by anyone with access to them.
+Before exporting, the action SHALL tell the user that exported files are plain, unencrypted text readable by anyone with access to them, unlike backups, and SHALL advise against exporting into a cloud-synced folder.
 
 #### Scenario: Warning shown
 - **WHEN** the user opens the export action

@@ -36,11 +36,11 @@ The user SHALL be able to set the theme preference from Settings. Light or Dark 
 - **THEN** the client switches to the light theme
 
 ### Requirement: Theme preference is per device
-The theme preference SHALL be stored as a device-local, non-sensitive UI preference. It SHALL NOT be synced to other devices or stored in the vault, and it SHALL persist across restarts on native clients and across sessions in the same browser.
+The theme preference SHALL be stored as a device-local, non-sensitive UI preference. It SHALL NOT be stored in the vault or included in backups, and it SHALL persist across restarts.
 
 #### Scenario: Not synced
-- **WHEN** the user selects Dark on the desktop app
-- **THEN** a browser session on the same account keeps its own theme preference
+- **WHEN** the user selects Dark and a backup of the notebook is restored on another computer
+- **THEN** that computer keeps its own theme preference
 
 #### Scenario: Survives restart
 - **WHEN** the user selects Light and restarts the desktop app
