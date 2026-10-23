@@ -84,15 +84,15 @@ A plain mouse click on link text SHALL place the cursor for editing. Mod-click (
 - **THEN** nothing is opened and no script runs
 
 ### Requirement: Task list checkboxes
-On lines no selection touches, live preview SHALL render a task list item's `[ ]` or `[x]` marker (either case of `x`) as a checkbox showing its state. Activating the checkbox by click or tap SHALL toggle the marker between `[ ]` and `[x]` as a normal local edit, without moving the cursor.
+On lines no selection touches, live preview SHALL render a task list item's `[ ]` or `[x]` marker (either case of `x`) as a checkbox showing its state. Clicking the checkbox SHALL toggle the marker between `[ ]` and `[x]` as a normal local edit, without moving the cursor.
 
 #### Scenario: Check a task
 - **WHEN** the line `- [ ] buy milk` renders a checkbox and the user clicks it
 - **THEN** the note text becomes `- [x] buy milk`, the checkbox shows checked, and the cursor stays where it was
 
-#### Scenario: Toggle is undoable and syncs
+#### Scenario: Toggle is undoable
 - **WHEN** the user checks a task and then undoes
-- **THEN** the line returns to `- [ ] buy milk`, and both edits reach other devices like any typed edit
+- **THEN** the line returns to `- [ ] buy milk`, and both edits are saved like any typed edit
 
 #### Scenario: Revealed on the active line
 - **WHEN** the cursor is on the line `- [x] done`

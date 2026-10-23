@@ -297,11 +297,18 @@ async fn settings_default_and_persist() {
     let app = install.launch();
     let defaults = app.settings().unwrap();
     assert!(!defaults.vim_mode);
+    assert_eq!(defaults.theme, "system");
+    assert!(!defaults.source_view && !defaults.focus_mode);
     assert!(defaults.collapsed_tags.is_empty());
 
     let app = registered(&server, &install, "alice").await;
     assert!(!app.settings().unwrap().vim_mode);
     app.set_vim_mode(true).unwrap();
+    app.set_preference("appearance.theme", "dark").unwrap();
+    app.set_preference("editor.focusMode", "true").unwrap();
+    assert!(app.set_preference("appearance.theme", "blue").is_err());
+    assert!(app.set_preference("editor.vimMode", "true").is_err());
+    assert!(app.set_preference("other", "true").is_err());
     app.set_tag_expanded("Work", false).unwrap();
     app.set_tag_expanded("home", false).unwrap();
     app.set_tag_expanded("home", true).unwrap();
@@ -310,6 +317,8 @@ async fn settings_default_and_persist() {
     let app = install.launch();
     let settings = app.settings().unwrap();
     assert!(settings.vim_mode);
+    assert_eq!(settings.theme, "dark");
+    assert!(settings.focus_mode && !settings.source_view);
     assert_eq!(settings.collapsed_tags, ["work"]);
 
     // Readable and writable while locked, too.

@@ -4,6 +4,7 @@
   import ReauthPrompt from '../account/ReauthPrompt.svelte'
   import SecureStoreNotice from '../account/SecureStoreNotice.svelte'
   import { errorMessage } from '../errors'
+  import type { PreferencesStore } from '../preferences'
   import { displayTitle, shortcutOf } from '../format'
   import {
     createVault,
@@ -23,13 +24,14 @@
   interface Props {
     core: CoreApi
     phase: PhaseState
+    preferences: PreferencesStore
   }
 
-  let { core, phase }: Props = $props()
+  let { core, phase, preferences }: Props = $props()
 
   // One vault per unlock: the shell is unmounted on lock, which drops it.
-  // The core and phase never change while it's mounted.
-  const vault = untrack(() => createVault(core, phase))
+  // The core, phase, and preferences never change while it's mounted.
+  const vault = untrack(() => createVault(core, phase, preferences))
   setVault(vault)
   const actions = new NoteActions(vault)
   const bridge = untrack(() => coreBridge(core))
@@ -62,7 +64,15 @@
     else void lock()
   }
 
-  let message = $derived(actions.error || shellError)
+  const preferenceError = untrack(() => preferences.saveError)
+
+  let message = $derived(
+    actions.error ||
+      shellError ||
+      ($preferenceError
+        ? `Couldn’t save that setting: ${errorMessage($preferenceError)}`
+        : ''),
+  )
 </script>
 
 <svelte:window {onkeydown} />
@@ -82,6 +92,7 @@
         onclick={() => {
           actions.error = ''
           shellError = ''
+          preferences.clearSaveError()
         }}
       >
         <span aria-hidden="true">✕</span>
