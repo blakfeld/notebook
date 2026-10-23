@@ -10,6 +10,8 @@
 //!   once under a key derived from an [`AuthSecret`] (the OPAQUE export key,
 //!   or a passphrase via [`derive_auth_secret`]) and once under a key derived
 //!   from the [`RecoveryKey`]. Either one alone unlocks the vault.
+//! - A local vault keeps a [`RecoveryEntry`] instead: the same recovery wrap
+//!   on its own, stored beside the vault and inside its backups.
 //!
 //! # Ciphertext envelope
 //!
@@ -38,6 +40,7 @@ mod kdf;
 mod keys;
 mod local_unlock;
 mod recovery;
+mod recovery_entry;
 mod secret;
 
 use std::fmt;
@@ -52,6 +55,7 @@ pub use kdf::{KdfVersion, Salt, derive_auth_secret};
 pub use keys::{NoteKey, PayloadKind, VaultKey};
 pub use local_unlock::LocalUnlock;
 pub use recovery::{RECOVERY_VERIFIER_LEN, RecoveryKey};
+pub use recovery_entry::RecoveryEntry;
 pub use secret::{AuthSecret, MIN_AUTH_SECRET_LEN};
 
 /// Errors from the vault cryptography.

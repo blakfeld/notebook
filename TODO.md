@@ -42,7 +42,22 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 
 1. [ ] `local-only-desktop`: no logins; first launch creates a notebook, vault key in the keychain, recovery key shown once, upgrade path for server-backed installs, no network access
    - Needs: nothing outstanding. **Critical path**: wave 2 waits on it.
-2. [ ] `vault-backup`, **core part** (tasks groups 1–3): backup file format, encryption, `import_note`, atomic writer, retention
+2. [~] `vault-backup`, **core part** (tasks groups 1–3): backup file format, encryption, `import_note`, atomic writer, retention
+   - In progress (branch `worktree-foamy-mapping-catmull`). `RecoveryEntry` is copied verbatim from the in-progress
+     `local-only-desktop` worktree (`crypto/recovery_entry.rs` plus small visibility changes in `bundle.rs`, `recovery.rs`, `mod.rs`)
+     so the two branches merge cleanly.
+   - Groups 1–3 implemented (tasks 1.1, 2.1–2.4, 3.1–3.2 checked off): `Storage::import_note`, `notebook_core::backup`
+     (format, `build`/`open`/`verify`, names), `notebook_core::time::stamp`, the native `backup::folder` writer and
+     retention, and `docs/backup-format.md`. Code review done (one finding fixed: the final step now hard-links so it
+     can never overwrite a file a sync client created meanwhile); fmt, both clippy checks, docs, tests, and
+     `openspec validate --strict` pass. **Core part complete**; stays `[~]` until the app part
+     (wave 2) lands and the change is archived.
+   - `security-analyst` pass done. One finding fixed: retention trusted file-name stamps, so planted or clock-skewed
+     future-dated files could push out every real backup. It now never deletes the backup just written and ignores
+     files stamped more than a day ahead.
+   - For group 4 restore: show the backup time from the payload (`OpenedBackup::created_at`), not the file name.
+   - Open question for group 4: after a restore on a second machine both share a vault ID, so if both back up into the
+     same folder, each one's retention prunes the other's backups.
    - Needs: only `RecoveryEntry` from `local-only-desktop` task 1.1, which is small; land that first or stub it.
    - The app part is in wave 2. Keep it as one change; groups 4–6 wait for `local-only-desktop`.
 3. [~] `editor-live-preview`: hidden syntax, typography, themes, focus mode, source view
@@ -56,6 +71,7 @@ Status: `[ ]` not started, `[~]` in progress (see note), `[x]` done and archived
 4. [ ] `markdown-export`: export all notes as markdown into a chosen folder
    - Needs: nothing outstanding. Updated for the pivot: zip/browser output removed.
    - Shares `tauri-plugin-dialog` and the `YYYYMMDD-HHMMSS` stamp formatter with `vault-backup`; whichever lands first adds them.
+     The stamp formatter now exists as `notebook_core::time::stamp` (on the `vault-backup` branch); reuse it.
 
 > **Milestone: no more logins.** Once `local-only-desktop` is archived, the app
 > opens straight into the notes and never touches the network. Don't shut down

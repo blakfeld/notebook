@@ -4,19 +4,19 @@ Groups 1–3 are core-only and can start before `local-only-desktop` is archived
 
 ## 1. Storage import
 
-- [ ] 1.1 Add `Storage::import_note(id, wrapped_key, snapshot)` to the trait, the memory store, and `SqliteStorage` (one transaction, no outbox entry, not pending), and add conformance cases; verify the "Import a note from a snapshot" scenarios pass against both stores via `cargo test -p notebook-core --features conformance` and `cargo test -p notebook-storage-sqlite`
+- [x] 1.1 Add `Storage::import_note(id, wrapped_key, snapshot)` to the trait, the memory store, and `SqliteStorage` (one transaction, no outbox entry, not pending), and add conformance cases; verify the "Import a note from a snapshot" scenarios pass against both stores via `cargo test -p notebook-core --features conformance` and `cargo test -p notebook-storage-sqlite`
 
 ## 2. Backup format in notebook-core
 
-- [ ] 2.1 Add the `backup` module with the header layout, `BackupError` (`NotABackup`, `TooNew`, `Damaged`, `WrongKey`), and `read_header`; verify unit tests for "Not a backup", "Newer format", and truncated headers
-- [ ] 2.2 Implement `build` and `open` (payload kind 48 under the vault key, bound to the vault ID) and `OpenedBackup::verify`; verify tests for every scenario under "Backup contents", "Backups are encrypted" (marker string and note-ID bytes absent from the file), and "Backups are tamper-evident" (every single-byte flip, every truncation length, header vault swapped)
-- [ ] 2.3 Add the shared `YYYYMMDD-HHMMSS` UTC stamp formatter (reuse `markdown-export`'s if it has landed, otherwise add it to a core `time` module that export then reuses) and the backup file-name and retention name pattern helpers; verify unit tests for the "Name from time" scenario and pattern matching of suffixed, conflicted-copy, and unrelated names
-- [ ] 2.4 Write `docs/backup-format.md` (layout, encryption, what is visible in the clear, restore steps) and module rustdoc; verify `cargo doc -p notebook-core --no-deps` is warning-free and the documented offsets match a test that parses a built file by hand
+- [x] 2.1 Add the `backup` module with the header layout, `BackupError` (`NotABackup`, `TooNew`, `Damaged`, `WrongKey`), and `read_header`; verify unit tests for "Not a backup", "Newer format", and truncated headers
+- [x] 2.2 Implement `build` and `open` (payload kind 48 under the vault key, bound to the vault ID) and `OpenedBackup::verify`; verify tests for every scenario under "Backup contents", "Backups are encrypted" (marker string and note-ID bytes absent from the file), and "Backups are tamper-evident" (every single-byte flip, every truncation length, header vault swapped)
+- [x] 2.3 Add the shared `YYYYMMDD-HHMMSS` UTC stamp formatter (reuse `markdown-export`'s if it has landed, otherwise add it to a core `time` module that export then reuses) and the backup file-name and retention name pattern helpers; verify unit tests for the "Name from time" scenario and pattern matching of suffixed, conflicted-copy, and unrelated names
+- [x] 2.4 Write `docs/backup-format.md` (layout, encryption, what is visible in the clear, restore steps) and module rustdoc; verify `cargo doc -p notebook-core --no-deps` is warning-free and the documented offsets match a test that parses a built file by hand
 
 ## 3. File writing and retention (native, notebook-app or a core native module)
 
-- [ ] 3.1 Implement the temp-then-rename writer with free-name resolution, partial-file cleanup, and the folder-must-exist check; verify `tempfile` tests for "Folder chosen", "Folder unavailable" (no folder created), "Failure mid-write", and an existing name getting a ` 2` suffix
-- [ ] 3.2 Implement retention by pattern and header vault; verify tests for "Old backups pruned" and "Other files untouched" (another vault's backups, a renamed backup, a Dropbox conflicted copy, an unreadable file)
+- [x] 3.1 Implement the temp-then-rename writer with free-name resolution, partial-file cleanup, and the folder-must-exist check; verify `tempfile` tests for "Folder chosen", "Folder unavailable" (no folder created), "Failure mid-write", and an existing name getting a ` 2` suffix
+- [x] 3.2 Implement retention by pattern and header vault; verify tests for "Old backups pruned" and "Other files untouched" (another vault's backups, a renamed backup, a Dropbox conflicted copy, an unreadable file)
 
 ## 4. App wiring (needs local-only-desktop)
 

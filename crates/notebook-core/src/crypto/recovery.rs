@@ -86,6 +86,11 @@ impl RecoveryKey {
         Ok(key)
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_random_for_tests(random: [u8; RANDOM_LEN]) -> Self {
+        Self(random)
+    }
+
     pub(crate) fn wrapping_key(&self, vault: VaultId) -> SymmetricKey {
         recovery_wrapping_key(&self.0, vault)
     }
