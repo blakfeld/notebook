@@ -8,6 +8,7 @@ pub mod auth;
 pub mod backup;
 pub mod crypto;
 pub mod document;
+pub mod export;
 pub mod note;
 pub mod protocol;
 pub mod search;

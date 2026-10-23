@@ -1,6 +1,7 @@
 import type {
   CoreEvents,
   EditorOpened,
+  ExportResult,
   ListEntry,
   Phase,
   Selection,
@@ -71,6 +72,13 @@ export interface CoreApi {
   deletePermanently(id: string): Promise<void>
   /** Renames or moves a tag across every note; returns how many changed. */
   renameTag(old: string, renamed: string): Promise<number>
+  /**
+   * Exports every note as markdown (see `docs/export-format.md`): into a
+   * folder the user picks on desktop, as a zip download in the browser.
+   * Resolves `null` when the user cancels. Fails with `export_failed`,
+   * whose message says why.
+   */
+  exportNotes(args: { includeTrashed: boolean }): Promise<ExportResult | null>
 
   // ---- editor host (see `editor/bridge.ts`; updates are base64) ----
   editorOpen(note: string): Promise<EditorOpened>

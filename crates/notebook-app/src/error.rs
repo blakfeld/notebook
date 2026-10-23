@@ -8,6 +8,7 @@ use std::fmt;
 use notebook_core::auth::AuthError;
 use notebook_core::auth::api::ErrorCode;
 use notebook_core::auth::http::AuthClientError;
+use notebook_core::export::ExportError;
 use notebook_core::storage::StorageError;
 use notebook_core::sync::{ReplicaError, SyncError};
 use notebook_core::workspace::{ServerUrlError, WorkspaceError};
@@ -42,6 +43,8 @@ pub enum Code {
     NotTrashed,
     Locked,
     NotFound,
+    /// Writing an export failed. The message says why and is shown.
+    ExportFailed,
     Internal,
 }
 
@@ -130,6 +133,12 @@ impl From<WorkspaceError> for AppError {
             WorkspaceError::Replica(_) | WorkspaceError::Sync(_) => Code::Internal,
         };
         Self::new(code, message)
+    }
+}
+
+impl From<ExportError> for AppError {
+    fn from(err: ExportError) -> Self {
+        Self::new(Code::ExportFailed, err.to_string())
     }
 }
 

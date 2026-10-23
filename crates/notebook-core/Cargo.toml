@@ -42,6 +42,7 @@ ulid.workspace = true
 unicode-normalization.workspace = true
 yrs.workspace = true
 zeroize.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 futures = { workspace = true, features = ["executor"] }

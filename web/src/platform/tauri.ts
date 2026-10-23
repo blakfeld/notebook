@@ -46,6 +46,7 @@ export function tauriCore(): CoreApi {
     setTrashed: (id, trashed) => call('set_trashed', { id, trashed }),
     deletePermanently: (id) => call('delete_permanently', { id }),
     renameTag: (old, renamed) => call('rename_tag', { old, new: renamed }),
+    exportNotes: (args) => call('export_notes', args),
 
     editorOpen: (note) => call('editor_open', { note }),
     editorPush: (session, update) => call('editor_push', { session, update }),

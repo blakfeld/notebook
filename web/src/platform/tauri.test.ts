@@ -35,6 +35,7 @@ describe('tauriCore', () => {
     await core.editorPush(3, 'AAE=')
     await core.setTagExpanded('work', false)
     await core.signOut(true)
+    await core.exportNotes({ includeTrashed: true })
     expect(invoke.mock.calls).toEqual([
       [
         'register',
@@ -61,7 +62,21 @@ describe('tauriCore', () => {
       ['editor_push', { session: 3, update: 'AAE=' }],
       ['set_tag_expanded', { path: 'work', expanded: false }],
       ['sign_out', { confirm: true }],
+      ['export_notes', { includeTrashed: true }],
     ])
+  })
+
+  it('returns the export result, or null when the picker is cancelled', async () => {
+    const core = tauriCore()
+    invoke.mockResolvedValueOnce({ count: 2, path: '/tmp/notebook-export-x' })
+    await expect(core.exportNotes({ includeTrashed: false })).resolves.toEqual({
+      count: 2,
+      path: '/tmp/notebook-export-x',
+    })
+    invoke.mockResolvedValueOnce(null)
+    await expect(
+      core.exportNotes({ includeTrashed: false }),
+    ).resolves.toBeNull()
   })
 
   it('passes host errors through and wraps anything else', async () => {

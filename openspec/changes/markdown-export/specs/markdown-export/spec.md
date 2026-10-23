@@ -107,7 +107,7 @@ A name that is empty after sanitizing SHALL become `Untitled`. A name equal to a
 - **THEN** its file name before `.md` is at most 120 bytes and is valid UTF-8
 
 ### Requirement: Deterministic collision suffixes
-Notes SHALL be named in ascending note-identifier order. A note SHALL take its sanitized name unless that name is already taken, compared after Unicode lowercasing; otherwise it SHALL take the name followed by ` N` for the smallest N ≥ 2 that is not taken. The same set of notes SHALL always produce the same names.
+Notes SHALL be named in ascending note-identifier order. A note SHALL take its sanitized name unless that name is already taken, compared after Unicode case folding and NFC normalization (the name itself keeps its form); otherwise it SHALL take the name followed by ` N` for the smallest N ≥ 2 that is not taken. The same set of notes SHALL always produce the same names.
 
 #### Scenario: Two notes with the same title
 - **WHEN** notes A and B, with A's identifier smaller, are both titled `Ideas`
