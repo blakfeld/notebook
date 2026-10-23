@@ -40,8 +40,8 @@
 - [ ] 6.1 Import the self-hosted fonts and add editor typography (72ch measure, centered, ≥16px padding, line height, heading scale); verify `npm run build` output contains the `woff2` files as same-origin assets and a manual check in the desktop app at a 360px-wide window and a wide window, in both themes
   - Fonts imported, 13 `woff2` files emitted as same-origin assets, no `data:` fonts; open: the 360px/wide manual check in both themes.
 - [x] 6.2 Implement the `focusMode` compartment that dims all top-level blocks except the one holding the main cursor; verify tests for the dim-other-paragraphs and follow-the-cursor scenarios
-- [ ] 6.3 Add smooth cursor transitions disabled under `prefers-reduced-motion`, and the active-line background; verify manually with the OS reduced-motion setting on and off
-  - Cursor transition and active-line background in `preview/theme.ts`; open: the manual reduced-motion check.
+- [x] 6.3 Add the active-line background, with no cursor animation; verify tests that the cursor styles have no transition and that a single cursor marks only its line
+  - Active-line background in `preview/theme.ts`. The cursor glide was removed: it made typing feel slow.
 - [x] 6.4 Implement source view by reconfiguring the `livePreview` compartment with scroll preserved, plus keyboard commands and editor view-options controls for source view and focus mode bound to the preferences store; verify tests that switching keeps selection, undo history, and vim mode, and that the preference applies to the next opened note
 
 ## 7. Integration checks
